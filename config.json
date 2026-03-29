@@ -1,0 +1,9 @@
+{
+    "email_user": "your_email@domain.com",
+    "email_password": "your_app_password",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "documents_folder": "./documents",
+    "scans_folder": "./scans",
+    "temp_folder": "./temp"
+}

@@ -1,0 +1,5 @@
+pysimplegui
+pypdf2
+pypdf2image
+yagmail
+pillow
