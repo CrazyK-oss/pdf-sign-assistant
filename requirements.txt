@@ -1,5 +1,5 @@
-pysimplegui
-pypdf2
-pypdf2image
+PySimpleGUI
+PyPDF2
+pdf2image
 yagmail
-pillow
+Pillow
