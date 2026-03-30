@@ -14,31 +14,33 @@ Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Correcciones críticas (v4)
+Correcciones críticas (v5)
 ---------------------------
-* BUGFIX PRINCIPAL: race condition al emitir guardado_listo.
-  Antes: _on_listo() emitía guardado_listo() directamente desde la señal
-  del worker, lo que hacía que main.py destruyera FaseGuardar (deleteLater)
-  mientras el QThread todavía no había completado su ciclo finished →
-  señales huérfanas → crash.
-  Ahora: _on_listo() solo guarda la ruta pendiente. La emisión real de
-  guardado_listo ocurre en _on_finished_thread(), conectado a
-  self._worker.finished, que se dispara DESPUÉS de que run() retorna y
-  el hilo está completamente cerrado.
-* closeEvent espera con wait() si el worker terminó pero deleteLater
-  todavía está pendiente, para no dejar objetos colgados.
-* _WorkerGuardar NO recibe parent= para evitar que Qt lo destruya
-  prematuramente cuando el widget hace deleteLater.
-* Guard anti-doble-disparo en _on_guardar.
-* FaseGuardar hereda de QDialog en lugar de QWidget; así se muestra
-  como ventana independiente y no se embebe en el parent QMainWindow.
+* BUGFIX PRINCIPAL (v5): la race condition real estaba en que
+  `guardado_listo` se emitía DENTRO del slot de `finished` del worker,
+  haciendo que main.py llamara deleteLater() sobre FaseGuardar mientras
+  todavía estábamos en el call-stack de ese slot → crash C++/segfault.
+  Solución: usar QMetaObject.invokeMethod con Qt.ConnectionType.QueuedConnection
+  para diferir la emisión de guardado_listo al siguiente ciclo del event loop,
+  cuando el slot de finished ya terminó y el call stack está limpio.
+
+* BUGFIX (v5): se eliminó la conexión doble de `finished` a `deleteLater` del
+  worker. El worker se limpia en `_limpiar_worker()` únicamente desde
+  `_on_finished_thread`, usando deleteLater() de forma controlada y DESPUÉS
+  de soltar la señal con invokeMethod encolado.
+
+* BUGFIX (v5): closeEvent ahora bloquea con wait() correctamente en todos los
+  casos antes de dejar que Qt destruya el widget.
+
+* Guard anti-doble-disparo en _on_guardar (conservado de v4).
+* FaseGuardar hereda de QDialog (conservado de v4).
 """
 
 import os
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMetaObject, Q_ARG
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -515,16 +517,19 @@ class FaseGuardar(QDialog):
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
-        # ── FIX race condition: guardado_listo se emite DESDE finished,
-        #    no desde listo. Así nos aseguramos que el QThread completó
-        #    su ciclo completo antes de que main.py destruya FaseGuardar.
+        # FIX v5: solo conectamos finished a _on_finished_thread.
+        # deleteLater del worker se hace DENTRO de _on_finished_thread,
+        # DESPUÉS de encolar guardado_listo con invokeMethod (QueuedConnection),
+        # para garantizar que el event loop esté limpio antes de que
+        # main.py destruya este widget.
         self._worker.finished.connect(self._on_finished_thread)
-        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _limpiar_worker(self):
-        """Suelta la referencia al worker; el objeto ya se destruyó vía deleteLater."""
-        self._worker = None
+        """Llama deleteLater sobre el worker y suelta la referencia Python."""
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
 
     def _set_guardando(self, guardando: bool):
         self.btn_guardar.setEnabled(not guardando)
@@ -560,18 +565,41 @@ class FaseGuardar(QDialog):
         """
         Se dispara cuando el QThread completó su ciclo finished —
         DESPUÉS de que run() retornó y el hilo está cerrado.
-        Es el momento seguro para notificar a main.py y dejar que
-        destruya FaseGuardar sin señales huérfanas pendientes.
+
+        FIX v5: la emisión de guardado_listo se hace con invokeMethod +
+        QueuedConnection en lugar de emitirla directamente aquí.
+        Esto asegura que guardado_listo llegue a main.py en el SIGUIENTE
+        ciclo del event loop, no mientras todavía estamos en el call-stack
+        del slot de `finished`. Así main.py puede llamar deleteLater() sobre
+        este widget de forma completamente segura, sin objetos colgados.
         """
-        self._limpiar_worker()
         self._set_guardando(False)
 
-        if self._ruta_final_pendiente is not None:
-            ruta = self._ruta_final_pendiente
-            self._ruta_final_pendiente = None
-            self.guardado_listo.emit(Path(ruta))
-        # Si _ruta_final_pendiente es None significa que el worker terminó
-        # con error (ya manejado por _on_error), no hacemos nada más.
+        ruta = self._ruta_final_pendiente
+        self._ruta_final_pendiente = None
+
+        # Liberamos el worker ANTES de encolar la emisión
+        self._limpiar_worker()
+
+        if ruta is not None:
+            # Encolar la emisión para el próximo ciclo del event loop
+            QMetaObject.invokeMethod(
+                self,
+                "_emitir_guardado_listo",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, ruta),
+            )
+        # Si ruta es None significa que el worker terminó con error
+        # (ya manejado por _on_error), no hacemos nada más.
+
+    def _emitir_guardado_listo(self, ruta: str):
+        """
+        Slot invocado de forma encolada desde _on_finished_thread.
+        En este punto el call-stack del slot de `finished` ya terminó,
+        por lo que es completamente seguro emitir guardado_listo y dejar
+        que main.py destruya este widget.
+        """
+        self.guardado_listo.emit(Path(ruta))
 
     def _on_error(self, mensaje: str):
         # No limpiamos el worker aquí; lo hace _on_finished_thread
@@ -595,8 +623,9 @@ class FaseGuardar(QDialog):
         if self._worker is not None and self._worker.isRunning():
             event.ignore()
             return
-        # Si el worker terminó pero su deleteLater está pendiente, esperamos
-        # el join para no dejar el hilo colgado al destruir el widget.
+        # Si el worker existe pero ya terminó, esperamos el join completo
+        # para no dejar el hilo colgado al destruir el widget.
         if self._worker is not None:
             self._worker.wait()
+            self._limpiar_worker()
         super().closeEvent(event)
