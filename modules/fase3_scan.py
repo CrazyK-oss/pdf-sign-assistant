@@ -1,6 +1,12 @@
 # modules/fase3_scan.py
 # Fase 3: Stand-by post-impresión.
 # Digitalización directa via WIA (Windows Image Acquisition) + carga manual.
+#
+# FIX: closeEvent ya NO borra los temporales de escaneo automáticamente.
+# La limpieza solo ocurre cuando el usuario presiona "Cambiar imagen" o al
+# inicio de un nuevo escaneo WIA. Esto evita que el archivo temporal se
+# elimine cuando main.py cierra VistaEscaneo para avanzar a FaseGuardar,
+# dejando a FaseGuardar sin imagen que procesar.
 
 
 import os
@@ -30,7 +36,7 @@ class WIAScanWorker(QThread):
             import win32com.client
 
             # Limpiar escaneos temporales anteriores para evitar
-            # el error WIA "Este archivo ya existe" en el segundo escaneo
+            # el error WIA «Este archivo ya existe» en el segundo escaneo
             for f in glob.glob(
                 os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
             ):
@@ -39,7 +45,7 @@ class WIAScanWorker(QThread):
                 except Exception:
                     pass
 
-            # WIA.CommonDialog — el mismo motor que "Fax y Escáner de Windows"
+            # WIA.CommonDialog — el mismo motor que «Fax y Escáner de Windows»
             wia = win32com.client.Dispatch("WIA.CommonDialog")
 
             # ShowAcquireImage(
@@ -79,7 +85,7 @@ class WIAScanWorker(QThread):
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Zona de drag & drop
-#  NOTA: el clic para abrir el explorador lo maneja el botón "Examinar"
+#  NOTA: el clic para abrir el explorador lo maneja el botón «Examinar»
 #  externo — ZonaDrop NO implementa mousePressEvent para evitar que se
 #  duplique el QFileDialog cuando el usuario hace clic en el botón.
 # ─────────────────────────────────────────────────────────────────────────
@@ -179,17 +185,20 @@ class VistaEscaneo(QWidget):
         self.num_pagina  = num_pagina
         self._ruta_img   = None
         self._worker     = None
+        # Flag: True cuando el flujo ya pasó a FaseGuardar y NO debemos
+        # borrar el archivo temporal al cerrar esta vista.
+        self._imagen_entregada = False
         self._construir_ui()
 
 
-    # ── Construcción de la UI ──────────────────────────────────────────
+    # ── Construcción de la UI ──────────────────────────────────────
     def _construir_ui(self):
         raiz = QVBoxLayout(self)
         raiz.setContentsMargins(0, 0, 0, 0)
         raiz.setSpacing(0)
 
 
-        # ── Cabecera ────────────────────────────────────────────────────
+        # ── Cabecera ────────────────────────────────────────────────
         cab = QFrame()
         cab.setFixedHeight(64)
         cab.setStyleSheet("""
@@ -236,7 +245,7 @@ class VistaEscaneo(QWidget):
         raiz.addWidget(cab)
 
 
-        # ── Contenido central ────────────────────────────────────────────
+        # ── Contenido central ───────────────────────────────────────
         cuerpo = QWidget()
         cuerpo.setStyleSheet("background: #f7f6f2;")
         lay_cuerpo = QVBoxLayout(cuerpo)
@@ -254,7 +263,7 @@ class VistaEscaneo(QWidget):
         lay_cuerpo.addWidget(lbl_desc)
 
 
-        # ── Fila: dos paneles de opciones ────────────────────────────────
+        # ── Fila: dos paneles de opciones ────────────────────────────
         fila = QHBoxLayout()
         fila.setSpacing(16)
         fila.addWidget(self._panel_wia())
@@ -522,7 +531,7 @@ class VistaEscaneo(QWidget):
         return barra
 
 
-    # ── Lógica WIA ─────────────────────────────────────────────────────
+    # ── Lógica WIA ──────────────────────────────────────────────
     def _on_digitalizar(self):
         try:
             import win32com.client  # noqa: F401 — solo verificar disponibilidad
@@ -563,7 +572,7 @@ class VistaEscaneo(QWidget):
         )
 
 
-    # ── Lógica manual ───────────────────────────────────────────────────
+    # ── Lógica manual ───────────────────────────────────────────
     def _on_examinar(self):
         ruta, _ = QFileDialog.getOpenFileName(
             self, "Seleccionar imagen escaneada",
@@ -574,7 +583,7 @@ class VistaEscaneo(QWidget):
             self._on_imagen_recibida(ruta)
 
 
-    # ── Imagen recibida (cualquier fuente) ──────────────────────────────
+    # ── Imagen recibida (cualquier fuente) ──────────────────────────
     def _on_imagen_recibida(self, ruta: str):
         self._ruta_img = ruta
         self._restablecer_btn_wia()
@@ -607,6 +616,7 @@ class VistaEscaneo(QWidget):
 
     def _on_cambiar_imagen(self):
         self._ruta_img = None
+        self._imagen_entregada = False
         self.lbl_prev_img.clear()   # limpiar pixmap anterior
         self.panel_preview.hide()
         self.btn_usar.setEnabled(False)
@@ -616,18 +626,29 @@ class VistaEscaneo(QWidget):
 
     def _on_usar_imagen(self):
         if self._ruta_img:
+            # Marcamos la imagen como entregada ANTES de emitir la señal,
+            # para que closeEvent no la borre cuando main.py cierre esta vista.
+            self._imagen_entregada = True
             self.imagen_lista.emit(self._ruta_img)
 
 
     def closeEvent(self, event):
-        # Limpiar archivos temporales de escaneos anteriores al cerrar
-        for f in glob.glob(
-            os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
-        ):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
+        """
+        FIX: solo borramos los temporales WIA si la imagen NO fue entregada
+        a FaseGuardar. Si _imagen_entregada es True, FaseGuardar es dueña
+        del archivo y es responsable de su vida útil; no lo tocamos.
+        """
         if self._worker and self._worker.isRunning():
             self._worker.wait()
+
+        # Solo limpiar temporales WIA si el flujo NO avanzó a FaseGuardar
+        if not self._imagen_entregada:
+            for f in glob.glob(
+                os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
+            ):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
         super().closeEvent(event)
