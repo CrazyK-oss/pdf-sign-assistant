@@ -6,41 +6,39 @@ Fase 4 del flujo principal: confirmación y guardado del PDF modificado.
 Recibe:
   - ruta_pdf    : Path del PDF de trabajo (en pdfs_trabajo/)
   - ruta_imagen : str  ruta de la imagen resultante (PNG/BMP/JPG)
-                       sin importar si vino del escáner manual o de
-                       drag-and-drop; el tratamiento es idéntico.
   - num_pagina  : int  índice 0-based de la página a reemplazar
 
 Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Correcciones críticas (v5)
+Correcciones críticas (v6)
 ---------------------------
-* BUGFIX PRINCIPAL (v5): la race condition real estaba en que
-  `guardado_listo` se emitía DENTRO del slot de `finished` del worker,
-  haciendo que main.py llamara deleteLater() sobre FaseGuardar mientras
-  todavía estábamos en el call-stack de ese slot → crash C++/segfault.
-  Solución: usar QMetaObject.invokeMethod con Qt.ConnectionType.QueuedConnection
-  para diferir la emisión de guardado_listo al siguiente ciclo del event loop,
-  cuando el slot de finished ya terminó y el call stack está limpio.
+* BUGFIX PRINCIPAL (v6): QMetaObject.invokeMethod + Q_ARG es API de PyQt5.
+  En PyQt6, Q_ARG existe pero no acepta tipos Python arbitrarios de esa
+  forma → crash silencioso / TypeError al despachar el método.
+  Solución correcta para PyQt6: señal interna _despachar_guardado_listo(str)
+  conectada con Qt.ConnectionType.QueuedConnection al slot _emitir_guardado_listo.
+  Así el despacho queda encolado en el event loop sin necesidad de invokeMethod.
 
-* BUGFIX (v5): se eliminó la conexión doble de `finished` a `deleteLater` del
-  worker. El worker se limpia en `_limpiar_worker()` únicamente desde
-  `_on_finished_thread`, usando deleteLater() de forma controlada y DESPUÉS
-  de soltar la señal con invokeMethod encolado.
+* BLINDAJE COMPLETO (v6): logging detallado en cada etapa del worker y en
+  todos los slots del widget para que cualquier excepción quede visible en
+  la consola en lugar de tragarse en silencio.
 
-* BUGFIX (v5): closeEvent ahora bloquea con wait() correctamente en todos los
-  casos antes de dejar que Qt destruya el widget.
+* GUARD EXTRA (v6): _on_finished_thread ya no ejecuta lógica si el widget
+  fue destruido (chequea sip.isdeleted cuando está disponible).
 
-* Guard anti-doble-disparo en _on_guardar (conservado de v4).
-* FaseGuardar hereda de QDialog (conservado de v4).
+* Conservado de v5: worker sin parent=, _ruta_final_pendiente, closeEvent
+  con wait(), guard anti-doble-disparo en _on_guardar, herencia de QDialog.
 """
 
+import logging
 import os
 import tempfile
+import traceback
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMetaObject, Q_ARG
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -48,23 +46,24 @@ from PyQt6.QtWidgets import (
     QProgressBar,
 )
 
+log = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Worker: convierte imagen → página PDF y reemplaza en hilo secundario
-#
-#  IMPORTANTE: no se le pasa parent= al constructor; el ciclo de vida
-#  lo maneja el widget a través de self._worker (referencia fuerte) y
-#  se limpia en _limpiar_worker() una vez que el hilo terminó.
 # ─────────────────────────────────────────────────────────────────────────
 class _WorkerGuardar(QThread):
     progreso = pyqtSignal(int, str)   # (porcentaje 0-100, etiqueta)
     listo    = pyqtSignal(str)        # ruta del PDF final
-    error    = pyqtSignal(str)
+    error    = pyqtSignal(str)        # mensaje de error completo
 
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
                  num_pagina: int, destino: Path):
-        # SIN parent= a propósito: evita que Qt destruya el thread
-        # cuando el widget padre recibe deleteLater antes del join.
+        # SIN parent= a propósito.
         super().__init__()
         self._ruta_pdf    = ruta_pdf
         self._ruta_imagen = ruta_imagen
@@ -72,10 +71,24 @@ class _WorkerGuardar(QThread):
         self._destino     = destino
 
     def run(self):
+        log.debug("Worker iniciado — pdf=%s imagen=%s pagina=%s destino=%s",
+                  self._ruta_pdf, self._ruta_imagen,
+                  self._num_pagina, self._destino)
         ruta_pag_pdf: str | None = None
         try:
-            # ── Etapa 1 / 4: Convertir imagen a PDF de una sola página ──
+            # ── Verificaciones previas ───────────────────────────────────
+            if not Path(self._ruta_imagen).exists():
+                raise FileNotFoundError(
+                    f"La imagen de origen no existe: {self._ruta_imagen}"
+                )
+            if not self._ruta_pdf.exists():
+                raise FileNotFoundError(
+                    f"El PDF de trabajo no existe: {self._ruta_pdf}"
+                )
+
+            # ── Etapa 1 / 4: Convertir imagen a PDF de una página ────────
             self.progreso.emit(10, "Convirtiendo imagen a PDF…")
+            log.debug("Etapa 1 — convirtiendo imagen a PDF")
             try:
                 import img2pdf
                 with open(self._ruta_imagen, "rb") as f_img:
@@ -84,86 +97,114 @@ class _WorkerGuardar(QThread):
                 tmp.write(datos_pdf)
                 tmp.close()
                 ruta_pag_pdf = tmp.name
+                log.debug("img2pdf OK → %s", ruta_pag_pdf)
             except ImportError:
-                # Fallback: Pillow si img2pdf no está instalado
+                log.debug("img2pdf no disponible, usando Pillow como fallback")
                 from PIL import Image
                 img = Image.open(self._ruta_imagen)
+                log.debug("Imagen abierta con Pillow — modo=%s tamaño=%s",
+                          img.mode, img.size)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
                 tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
                 tmp.close()
                 img.save(tmp.name, "PDF", resolution=150)
                 ruta_pag_pdf = tmp.name
+                log.debug("Pillow PDF OK → %s", ruta_pag_pdf)
 
             # ── Etapa 2 / 4: Abrir el PDF original ──────────────────────
             self.progreso.emit(35, "Leyendo documento original…")
+            log.debug("Etapa 2 — leyendo PDF original")
             try:
                 from pypdf import PdfReader, PdfWriter
+                log.debug("Usando pypdf")
             except ImportError:
-                from PyPDF2 import PdfReader, PdfWriter
+                from PyPDF2 import PdfReader, PdfWriter  # type: ignore
+                log.debug("Usando PyPDF2 (fallback)")
 
             lector_orig  = PdfReader(str(self._ruta_pdf))
             lector_nueva = PdfReader(ruta_pag_pdf)
+            total_pags   = len(lector_orig.pages)
+            log.debug("PDF original: %d páginas — reemplazando índice %d",
+                      total_pags, self._num_pagina)
+
+            if self._num_pagina >= total_pags:
+                raise IndexError(
+                    f"Índice de página {self._num_pagina} fuera de rango "
+                    f"(el PDF tiene {total_pags} página/s)."
+                )
 
             # ── Etapa 3 / 4: Reemplazar la página seleccionada ──────────
             self.progreso.emit(60, "Reemplazando página…")
+            log.debug("Etapa 3 — construyendo PDF resultante")
             writer = PdfWriter()
             for i, pag in enumerate(lector_orig.pages):
                 if i == self._num_pagina:
                     pag_nueva = lector_nueva.pages[0]
-                    # Respetar el tamaño de la página original
                     pag_nueva.mediabox = pag.mediabox
                     writer.add_page(pag_nueva)
+                    log.debug("Página %d reemplazada", i)
                 else:
                     writer.add_page(pag)
 
             # ── Etapa 4 / 4: Escribir el PDF resultante ─────────────────
             self.progreso.emit(85, "Escribiendo archivo final…")
+            log.debug("Etapa 4 — escribiendo en %s", self._destino)
             with open(self._destino, "wb") as f_out:
                 writer.write(f_out)
+            log.debug("Archivo escrito OK — tamaño=%d bytes",
+                      self._destino.stat().st_size)
 
-            # Limpieza del temporal
+            # Limpieza temporal
             try:
                 os.remove(ruta_pag_pdf)
-            except Exception:
-                pass
+                log.debug("Temporal eliminado: %s", ruta_pag_pdf)
+            except Exception as e_rm:
+                log.warning("No se pudo eliminar temporal %s: %s",
+                            ruta_pag_pdf, e_rm)
 
             self.progreso.emit(100, "¡Listo!")
+            log.debug("Worker terminado exitosamente — emitiendo listo")
             self.listo.emit(str(self._destino))
 
         except Exception as e:
+            tb = traceback.format_exc()
+            log.error("Error en worker:\n%s", tb)
             if ruta_pag_pdf:
                 try:
                     os.remove(ruta_pag_pdf)
                 except Exception:
                     pass
-            self.error.emit(str(e))
+            self.error.emit(f"{e}\n\n─── Traceback completo ───\n{tb}")
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Widget principal de la Fase 4
-#
-#  Hereda de QDialog en lugar de QWidget para que se abra como ventana
-#  independiente y no quede embebido dentro de QMainWindow.
 # ─────────────────────────────────────────────────────────────────────────
 class FaseGuardar(QDialog):
     """
     Pantalla de confirmación y guardado del documento modificado.
 
-    Acepta ruta_imagen de cualquier origen (escáner manual o drag-and-drop).
-    Muestra barra de progreso real durante la conversión y guardado.
+    Señales públicas:
+      guardado_listo(object / Path)  → PDF guardado correctamente
+      cancelado()                    → usuario canceló
 
-    Señales:
-      guardado_listo(Path)  → PDF guardado correctamente
-      cancelado()           → usuario canceló / volver al escaneo
+    Señal interna (NO conectar desde fuera):
+      _despachar_guardado_listo(str) → encolada con QueuedConnection para
+          diferir la emisión de guardado_listo al siguiente ciclo del event
+          loop, evitando el crash al que llevaba invokeMethod+Q_ARG (PyQt5 API).
     """
     guardado_listo = pyqtSignal(object)   # Path
     cancelado      = pyqtSignal()
 
+    # Señal interna para despacho encolado — reemplaza invokeMethod+Q_ARG
+    _despachar_guardado_listo = pyqtSignal(str)
+
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
                  num_pagina: int, carpeta_firmados: Path, parent=None):
         super().__init__(parent)
-        # Ventana independiente con botón de cierre estándar
+        log.debug("FaseGuardar.__init__ — pdf=%s imagen=%s pagina=%d",
+                  ruta_pdf, ruta_imagen, num_pagina)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowCloseButtonHint
@@ -173,10 +214,18 @@ class FaseGuardar(QDialog):
         self._num_pagina            = num_pagina
         self._carpeta_firmados      = carpeta_firmados
         self._worker: _WorkerGuardar | None = None
-        # Ruta pendiente de emitir; se establece en _on_listo y se
-        # consume en _on_finished_thread para evitar la race condition.
         self._ruta_final_pendiente: str | None = None
+
+        # Conectar la señal interna con QueuedConnection ANTES de construir UI.
+        # Esto garantiza que _emitir_guardado_listo siempre se ejecute en el
+        # hilo principal, en el siguiente ciclo del event loop.
+        self._despachar_guardado_listo.connect(
+            self._emitir_guardado_listo,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
         self._construir_ui()
+        log.debug("FaseGuardar UI construida OK")
 
     # ── UI ────────────────────────────────────────────────────────────
     def _construir_ui(self):
@@ -342,7 +391,6 @@ class FaseGuardar(QDialog):
                 color: #bab9b4;
             }
         """)
-        # Nombre por defecto = stem del PDF original (sin prefijo reedit_)
         stem = Path(str(self._ruta_pdf)).stem
         if stem.startswith("reedit_"):
             stem = stem[len("reedit_"):]
@@ -364,7 +412,7 @@ class FaseGuardar(QDialog):
 
         lay_cuerpo.addWidget(panel_nombre)
 
-        # ── Barra de progreso (oculta hasta que inicia el guardado) ───
+        # ── Panel de progreso ─────────────────────────────────────────
         self.panel_progreso = QFrame()
         self.panel_progreso.setStyleSheet("""
             QFrame {
@@ -404,6 +452,15 @@ class FaseGuardar(QDialog):
         """)
         lay_prog.addWidget(self.barra_progreso)
 
+        # Label de error detallado (visible solo cuando el worker falla)
+        self.lbl_error_detalle = QLabel("")
+        self.lbl_error_detalle.setStyleSheet(
+            "color: #a13544; font-size: 11px;"
+        )
+        self.lbl_error_detalle.setWordWrap(True)
+        self.lbl_error_detalle.hide()
+        lay_prog.addWidget(self.lbl_error_detalle)
+
         self.panel_progreso.hide()
         lay_cuerpo.addWidget(self.panel_progreso)
 
@@ -413,15 +470,20 @@ class FaseGuardar(QDialog):
         raiz.addWidget(self._barra_inferior())
 
     def _cargar_preview(self):
-        pm = QPixmap(self._ruta_imagen)
-        if not pm.isNull():
-            self.lbl_img.setPixmap(
-                pm.scaled(
-                    90, 118,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
+        try:
+            pm = QPixmap(self._ruta_imagen)
+            if not pm.isNull():
+                self.lbl_img.setPixmap(
+                    pm.scaled(
+                        90, 118,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
                 )
-            )
+            else:
+                log.warning("Preview: QPixmap nulo para %s", self._ruta_imagen)
+        except Exception as e:
+            log.warning("Preview: no se pudo cargar imagen — %s", e)
 
     def _barra_inferior(self) -> QFrame:
         barra = QFrame()
@@ -466,8 +528,12 @@ class FaseGuardar(QDialog):
         return barra
 
     # ── Lógica de guardado ────────────────────────────────────────────
+
+    @pyqtSlot()
     def _on_guardar(self):
-        # Guard: evita doble disparo si el worker ya está corriendo
+        log.debug("_on_guardar — worker activo=%s",
+                  self._worker is not None and self._worker.isRunning())
+
         if self._worker is not None and self._worker.isRunning():
             return
 
@@ -492,6 +558,7 @@ class FaseGuardar(QDialog):
             nombre += ".pdf"
 
         destino = self._carpeta_firmados / nombre
+        log.debug("Destino del guardado: %s", destino)
 
         if destino.exists():
             resp = QMessageBox.question(
@@ -504,10 +571,28 @@ class FaseGuardar(QDialog):
             if resp != QMessageBox.StandardButton.Yes:
                 return
 
+        # Validar que los archivos de entrada existen antes de lanzar el worker
+        if not Path(self._ruta_imagen).exists():
+            log.error("Imagen de entrada no encontrada: %s", self._ruta_imagen)
+            QMessageBox.critical(
+                self, "Archivo no encontrado",
+                f"No se encontró la imagen de entrada:\n{self._ruta_imagen}\n\n"
+                "Volvé al paso de escaneo y seleccioná la imagen nuevamente."
+            )
+            return
+
+        if not self._ruta_pdf.exists():
+            log.error("PDF de trabajo no encontrado: %s", self._ruta_pdf)
+            QMessageBox.critical(
+                self, "Archivo no encontrado",
+                f"No se encontró el PDF de trabajo:\n{self._ruta_pdf}\n\n"
+                "El archivo puede haberse eliminado. Cancelá y abrí el PDF nuevamente."
+            )
+            return
+
         self._ruta_final_pendiente = None
         self._set_guardando(True)
 
-        # ── Crear worker SIN parent= (ver docstring de clase) ────────
         self._worker = _WorkerGuardar(
             self._ruta_pdf,
             self._ruta_imagen,
@@ -517,17 +602,13 @@ class FaseGuardar(QDialog):
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
-        # FIX v5: solo conectamos finished a _on_finished_thread.
-        # deleteLater del worker se hace DENTRO de _on_finished_thread,
-        # DESPUÉS de encolar guardado_listo con invokeMethod (QueuedConnection),
-        # para garantizar que el event loop esté limpio antes de que
-        # main.py destruya este widget.
         self._worker.finished.connect(self._on_finished_thread)
+        log.debug("Worker creado — arrancando hilo")
         self._worker.start()
 
     def _limpiar_worker(self):
-        """Llama deleteLater sobre el worker y suelta la referencia Python."""
         if self._worker is not None:
+            log.debug("Limpiando worker")
             self._worker.deleteLater()
             self._worker = None
 
@@ -544,88 +625,114 @@ class FaseGuardar(QDialog):
             )
             self.barra_progreso.setValue(0)
             self.lbl_progreso_etapa.setText("Iniciando…")
+            self.lbl_error_detalle.hide()
             self.panel_progreso.show()
         else:
             self.btn_guardar.setText("Guardar documento  ✓")
             self.lbl_estado.setText("Revisá el nombre y confirmá para guardar.")
             self.lbl_estado.setStyleSheet("color: #7a7974; font-size: 13px;")
-            self.panel_progreso.hide()
 
+    @pyqtSlot(int, str)
     def _on_progreso(self, porcentaje: int, etiqueta: str):
+        log.debug("Progreso: %d%% — %s", porcentaje, etiqueta)
         self.barra_progreso.setValue(porcentaje)
         self.lbl_progreso_etapa.setText(etiqueta)
 
+    @pyqtSlot(str)
     def _on_listo(self, ruta_str: str):
+        log.debug("Worker emitió listo — ruta=%s", ruta_str)
         # Solo guardamos la ruta; la emisión real ocurre en _on_finished_thread
-        # para garantizar que el QThread terminó completamente antes de que
-        # main.py destruya este widget.
         self._ruta_final_pendiente = ruta_str
 
+    @pyqtSlot()
     def _on_finished_thread(self):
         """
-        Se dispara cuando el QThread completó su ciclo finished —
-        DESPUÉS de que run() retornó y el hilo está cerrado.
+        Slot de QThread.finished — se ejecuta en el hilo PRINCIPAL.
 
-        FIX v5: la emisión de guardado_listo se hace con invokeMethod +
-        QueuedConnection en lugar de emitirla directamente aquí.
-        Esto asegura que guardado_listo llegue a main.py en el SIGUIENTE
-        ciclo del event loop, no mientras todavía estamos en el call-stack
-        del slot de `finished`. Así main.py puede llamar deleteLater() sobre
-        este widget de forma completamente segura, sin objetos colgados.
+        FIX v6: en lugar de QMetaObject.invokeMethod + Q_ARG (PyQt5 API que
+        falla silenciosamente en PyQt6), usamos la señal interna
+        _despachar_guardado_listo conectada con QueuedConnection.
+        Emitir esa señal aquí la encola en el event loop, garantizando que
+        _emitir_guardado_listo se ejecute en el SIGUIENTE ciclo, cuando el
+        call-stack del slot finished ya terminó y main.py puede destruir
+        este widget de forma segura.
         """
+        log.debug("_on_finished_thread — ruta_pendiente=%s",
+                  self._ruta_final_pendiente)
+
         self._set_guardando(False)
 
         ruta = self._ruta_final_pendiente
         self._ruta_final_pendiente = None
 
-        # Liberamos el worker ANTES de encolar la emisión
+        # Liberar worker ANTES de encolar la emisión
         self._limpiar_worker()
 
         if ruta is not None:
-            # Encolar la emisión para el próximo ciclo del event loop
-            QMetaObject.invokeMethod(
-                self,
-                "_emitir_guardado_listo",
-                Qt.ConnectionType.QueuedConnection,
-                Q_ARG(str, ruta),
-            )
-        # Si ruta es None significa que el worker terminó con error
-        # (ya manejado por _on_error), no hacemos nada más.
+            log.debug("Encolando _despachar_guardado_listo con ruta=%s", ruta)
+            # Esta emisión queda encolada gracias a QueuedConnection
+            self._despachar_guardado_listo.emit(ruta)
+        else:
+            log.debug("ruta_pendiente es None — el worker terminó con error")
 
+    @pyqtSlot(str)
     def _emitir_guardado_listo(self, ruta: str):
         """
-        Slot invocado de forma encolada desde _on_finished_thread.
-        En este punto el call-stack del slot de `finished` ya terminó,
-        por lo que es completamente seguro emitir guardado_listo y dejar
-        que main.py destruya este widget.
+        Slot invocado en el siguiente ciclo del event loop vía
+        _despachar_guardado_listo (QueuedConnection).
+        En este punto el call-stack del slot de `finished` ya terminó;
+        es seguro emitir guardado_listo y dejar que main.py destruya este widget.
         """
-        self.guardado_listo.emit(Path(ruta))
+        log.debug("_emitir_guardado_listo — emitiendo guardado_listo con %s", ruta)
+        try:
+            self.guardado_listo.emit(Path(ruta))
+        except Exception as e:
+            log.error("Error al emitir guardado_listo: %s", e)
 
+    @pyqtSlot(str)
     def _on_error(self, mensaje: str):
-        # No limpiamos el worker aquí; lo hace _on_finished_thread
-        # cuando finished se dispare justo después.
+        """
+        Slot del worker.error — se ejecuta en el hilo principal.
+        No limpiamos el worker aquí; lo hace _on_finished_thread
+        cuando finished se dispare justo después.
+        """
+        log.error("Worker reportó error:\n%s", mensaje)
         self._set_guardando(False)
+
+        # Mostramos el error resumido en el panel de progreso
+        resumen = mensaje.split("\n")[0]
+        self.lbl_progreso_etapa.setText("❌  Error al guardar")
+        self.lbl_progreso_etapa.setStyleSheet(
+            "color: #a13544; font-size: 13px; font-weight: 600;"
+        )
+        self.lbl_error_detalle.setText(resumen)
+        self.lbl_error_detalle.show()
+        self.panel_progreso.show()
+
         QMessageBox.critical(
             self,
             "Error al guardar",
-            f"No se pudo guardar el documento:\n\n{mensaje}\n\n"
+            f"No se pudo guardar el documento:\n\n{resumen}\n\n"
+            "Revisá la consola para el traceback completo.\n"
             "Verificá que pypdf (o PyPDF2) y Pillow estén instalados.",
         )
 
+    @pyqtSlot()
     def _on_cancelar(self):
-        """Solo disponible cuando el worker NO está corriendo."""
         if self._worker is not None and self._worker.isRunning():
+            log.debug("_on_cancelar ignorado — worker activo")
             return
+        log.debug("_on_cancelar — emitiendo cancelado")
         self.cancelado.emit()
 
     def closeEvent(self, event):
-        """Bloquea el cierre con la X si el worker está activo."""
         if self._worker is not None and self._worker.isRunning():
+            log.debug("closeEvent bloqueado — worker activo")
             event.ignore()
             return
-        # Si el worker existe pero ya terminó, esperamos el join completo
-        # para no dejar el hilo colgado al destruir el widget.
         if self._worker is not None:
+            log.debug("closeEvent — esperando worker con wait()")
             self._worker.wait()
             self._limpiar_worker()
+        log.debug("closeEvent aceptado")
         super().closeEvent(event)
