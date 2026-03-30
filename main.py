@@ -1,10 +1,94 @@
-import PySimpleGUI as sg
+"""
+main.py — Punto de entrada autónomo del PDF Sign Assistant.
+
+Primera vez:  python main.py  →  crea venv, instala dependencias, relanza la app.
+Siguientes:   python main.py  →  arranca directo, sin comandos extra.
+"""
+
+import sys
+import os
+import subprocess
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent.resolve()
+VENV_DIR = BASE_DIR / "venv"
+REQUIREMENTS = BASE_DIR / "requirements.txt"
+
+# --------------------------------------------------------------------------- #
+#  Detectar si ya estamos corriendo DENTRO del venv                           #
+# --------------------------------------------------------------------------- #
+def _running_in_venv() -> bool:
+    return (
+        hasattr(sys, "real_prefix")
+        or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Crear venv si no existe                                                    #
+# --------------------------------------------------------------------------- #
+def _ensure_venv():
+    if not VENV_DIR.exists():
+        print("[SETUP] Creando entorno virtual por primera vez...")
+        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
+        print("[SETUP] Entorno virtual creado.")
+
+
+# --------------------------------------------------------------------------- #
+#  Ruta al Python/pip dentro del venv                                         #
+# --------------------------------------------------------------------------- #
+def _venv_python() -> Path:
+    if sys.platform == "win32":
+        return VENV_DIR / "Scripts" / "python.exe"
+    return VENV_DIR / "bin" / "python"
+
+
+def _venv_pip() -> Path:
+    if sys.platform == "win32":
+        return VENV_DIR / "Scripts" / "pip.exe"
+    return VENV_DIR / "bin" / "pip"
+
+
+# --------------------------------------------------------------------------- #
+#  Instalar dependencias                                                      #
+# --------------------------------------------------------------------------- #
+def _ensure_deps():
+    print("[SETUP] Verificando dependencias...")
+    subprocess.check_call(
+        [str(_venv_pip()), "install", "--quiet", "--upgrade", "pip"],
+    )
+    subprocess.check_call(
+        [str(_venv_pip()), "install", "--quiet", "-r", str(REQUIREMENTS)],
+    )
+    print("[SETUP] Dependencias listas.")
+
+
+# --------------------------------------------------------------------------- #
+#  Relanzar con el Python del venv                                            #
+# --------------------------------------------------------------------------- #
+def _relaunch_in_venv():
+    print("[SETUP] Relanzando dentro del entorno virtual...\n")
+    os.execv(str(_venv_python()), [str(_venv_python())] + sys.argv)
+
+
+# --------------------------------------------------------------------------- #
+#  Bootstrap: sólo corre si NO estamos dentro del venv                       #
+# --------------------------------------------------------------------------- #
+if not _running_in_venv():
+    _ensure_venv()
+    _ensure_deps()
+    _relaunch_in_venv()
+
+
+# --------------------------------------------------------------------------- #
+#  A partir de aquí el código corre SIEMPRE dentro del venv                  #
+# --------------------------------------------------------------------------- #
+import PySimpleGUI as sg  # noqa: E402  (importación después del bootstrap)
 from modules.setup import setup_directories, load_config
 from modules.fase1_preview import seleccionar_paginas
 from modules.fase2_print import imprimir_paginas
 from modules.fase3_scan import escanear_y_reemplazar
 from modules.fase4_email import enviar_documento
-from pathlib import Path
 
 
 def main():
