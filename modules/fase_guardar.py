@@ -14,16 +14,15 @@ Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Cambios respecto a la versión anterior
----------------------------------------
-* Barra de progreso real con 4 etapas reportadas por el worker.
-* Worker emite señal `progreso(int, str)` para feedback granular.
-* El nombre de destino se pre-rellena con el stem del PDF original
-  (sin prefijo reedit_) y el usuario puede cambiarlo antes de guardar.
-* Se eliminó la dependencia de QMessageBox para el estado "Guardando";
-  ahora la barra de progreso + etiqueta dan feedback visual suficiente.
-* Unificación total: no importa el origen de ruta_imagen, el flujo
-  de conversión → reemplazo de página → escritura es el mismo.
+Correcciones críticas (v3)
+---------------------------
+* _WorkerGuardar NO recibe parent= para evitar que Qt lo destruya
+  prematuramente cuando el widget hace deleteLater.
+* finished del QThread se conecta a su propio deleteLater (patrón Qt
+  correcto para threads de un solo uso).
+* Guard anti-doble-disparo en _on_guardar.
+* FaseGuardar hereda de QDialog en lugar de QWidget; así se muestra
+  como ventana independiente y no se embebe en el parent QMainWindow.
 """
 
 import os
@@ -33,7 +32,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QLineEdit, QMessageBox, QSizePolicy, QSpacerItem,
     QProgressBar,
 )
@@ -41,7 +40,10 @@ from PyQt6.QtWidgets import (
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Worker: convierte imagen → página PDF y reemplaza en hilo secundario
-#  Emite progreso en 4 etapas (0-25-60-90-100 %)
+#
+#  IMPORTANTE: no se le pasa parent= al constructor; el ciclo de vida
+#  lo maneja el widget a través de self._worker (referencia fuerte) y
+#  se limpia en _limpiar_worker() una vez que el hilo terminó.
 # ─────────────────────────────────────────────────────────────────────────
 class _WorkerGuardar(QThread):
     progreso = pyqtSignal(int, str)   # (porcentaje 0-100, etiqueta)
@@ -49,8 +51,10 @@ class _WorkerGuardar(QThread):
     error    = pyqtSignal(str)
 
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
-                 num_pagina: int, destino: Path, parent=None):
-        super().__init__(parent)
+                 num_pagina: int, destino: Path):
+        # SIN parent= a propósito: evita que Qt destruya el thread
+        # cuando el widget padre recibe deleteLater antes del join.
+        super().__init__()
         self._ruta_pdf    = ruta_pdf
         self._ruta_imagen = ruta_imagen
         self._num_pagina  = num_pagina
@@ -117,7 +121,6 @@ class _WorkerGuardar(QThread):
             self.listo.emit(str(self._destino))
 
         except Exception as e:
-            # Limpiar temporal si algo falló a mitad
             if ruta_pag_pdf:
                 try:
                     os.remove(ruta_pag_pdf)
@@ -128,8 +131,11 @@ class _WorkerGuardar(QThread):
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Widget principal de la Fase 4
+#
+#  Hereda de QDialog en lugar de QWidget para que se abra como ventana
+#  independiente y no quede embebido dentro de QMainWindow.
 # ─────────────────────────────────────────────────────────────────────────
-class FaseGuardar(QWidget):
+class FaseGuardar(QDialog):
     """
     Pantalla de confirmación y guardado del documento modificado.
 
@@ -138,7 +144,7 @@ class FaseGuardar(QWidget):
 
     Señales:
       guardado_listo(Path)  → PDF guardado correctamente
-      cancelado()           → usuario canceló
+      cancelado()           → usuario canceló / volver al escaneo
     """
     guardado_listo = pyqtSignal(object)   # Path
     cancelado      = pyqtSignal()
@@ -146,6 +152,11 @@ class FaseGuardar(QWidget):
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
                  num_pagina: int, carpeta_firmados: Path, parent=None):
         super().__init__(parent)
+        # Ventana independiente con botón de cierre estándar
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self._ruta_pdf         = ruta_pdf
         self._ruta_imagen      = ruta_imagen
         self._num_pagina       = num_pagina
@@ -200,13 +211,13 @@ class FaseGuardar(QWidget):
             QPushButton:hover { color: #28251d; border-color: rgba(40,37,29,0.45); }
             QPushButton:disabled { color: #bab9b4; border-color: rgba(40,37,29,0.10); }
         """)
-        self.btn_volver.clicked.connect(self.cancelado)
+        self.btn_volver.clicked.connect(self._on_cancelar)
         lay_cab.addWidget(self.btn_volver)
         raiz.addWidget(cab)
 
         # Cuerpo
-        cuerpo = QWidget()
-        cuerpo.setStyleSheet("background: #f7f6f2;")
+        cuerpo = QFrame()
+        cuerpo.setStyleSheet("QFrame { background: #f7f6f2; }")
         lay_cuerpo = QVBoxLayout(cuerpo)
         lay_cuerpo.setContentsMargins(40, 28, 40, 28)
         lay_cuerpo.setSpacing(20)
@@ -442,6 +453,10 @@ class FaseGuardar(QWidget):
 
     # ── Lógica de guardado ────────────────────────────────────────────
     def _on_guardar(self):
+        # Guard: evita doble disparo si el worker ya está corriendo
+        if self._worker is not None and self._worker.isRunning():
+            return
+
         nombre = self.input_nombre.text().strip()
         if not nombre:
             self.lbl_error_nombre.setText("El nombre no puede estar vacío.")
@@ -477,17 +492,23 @@ class FaseGuardar(QWidget):
 
         self._set_guardando(True)
 
+        # ── Crear worker SIN parent= (ver docstring de clase) ────────
         self._worker = _WorkerGuardar(
             self._ruta_pdf,
             self._ruta_imagen,
             self._num_pagina,
             destino,
-            parent=self,
         )
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
+        # El thread se auto-destruye una vez que finished dispara
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
+
+    def _limpiar_worker(self):
+        """Suelta la referencia al worker; el objeto ya se destruyó vía deleteLater."""
+        self._worker = None
 
     def _set_guardando(self, guardando: bool):
         self.btn_guardar.setEnabled(not guardando)
@@ -500,7 +521,6 @@ class FaseGuardar(QWidget):
             self.lbl_estado.setStyleSheet(
                 "color: #01696f; font-size: 13px; font-weight: 600;"
             )
-            # Mostrar barra de progreso
             self.barra_progreso.setValue(0)
             self.lbl_progreso_etapa.setText("Iniciando…")
             self.panel_progreso.show()
@@ -515,10 +535,12 @@ class FaseGuardar(QWidget):
         self.lbl_progreso_etapa.setText(etiqueta)
 
     def _on_listo(self, ruta_str: str):
+        self._limpiar_worker()
         self._set_guardando(False)
         self.guardado_listo.emit(Path(ruta_str))
 
     def _on_error(self, mensaje: str):
+        self._limpiar_worker()
         self._set_guardando(False)
         QMessageBox.critical(
             self,
@@ -526,3 +548,16 @@ class FaseGuardar(QWidget):
             f"No se pudo guardar el documento:\n\n{mensaje}\n\n"
             "Verificá que pypdf (o PyPDF2) y Pillow estén instalados.",
         )
+
+    def _on_cancelar(self):
+        """Solo disponible cuando el worker NO está corriendo."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.cancelado.emit()
+
+    def closeEvent(self, event):
+        """Bloquea el cierre con la X si el worker está activo."""
+        if self._worker is not None and self._worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
