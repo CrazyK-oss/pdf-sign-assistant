@@ -1,5 +1,6 @@
 PyQt6
-PyPDF2
-pdf2image
-yagmail
+pymupdf
 Pillow
+img2pdf
+pypdf
+watchdog

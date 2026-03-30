@@ -601,66 +601,27 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Flujo de trabajo principal ────────────────────────────────────────
 
+    # En main.py — método _iniciar_flujo_trabajo
+    from modules.fase1_preview import VistaPrevisualizacion
+
     def _iniciar_flujo_trabajo(self):
-        """
-        Orquesta el flujo completo:
-          Fase 1 → seleccionar página (módulo fase1_preview)
-          Fase 2 → imprimir          (módulo fase2_print)
-          Fase 3 → escanear/adjuntar (módulo fase3_scan)
-          Fase 4 → confirmar/guardar (módulo fase_guardar — Parte 4)
-        """
-        if self._pdf_activo is None:
-            return
+        # Limpiar vista anterior si existe
+        if hasattr(self, '_vista_preview') and self._vista_preview:
+            self.stack.removeWidget(self._vista_preview)
+            self._vista_preview.deleteLater()
 
-        # ── Fase 1: selección de página ───────────────────────────────────
-        try:
-            from modules.fase1_preview import seleccionar_paginas
-        except ImportError as e:
-            QMessageBox.critical(self, "Error de módulo", str(e))
-            return
+        self._vista_preview = VistaPrevisualizacion(self.pdf_activo)
+        self._vista_preview.pagina_seleccionada.connect(self._on_pagina_elegida)
+        self._vista_preview.cancelar.connect(self._cancelar_pdf_activo)
 
-        paginas = seleccionar_paginas(self._pdf_activo)
-        if paginas is None:
-            self.status.showMessage("Selección de páginas cancelada.")
-            return
+        self.stack.addWidget(self._vista_preview)
+        self.stack.setCurrentWidget(self._vista_preview)
 
-        pagina_idx = paginas[0]   # Por ahora solo se trabaja una página
-        self.status.showMessage(
-            f"Página {pagina_idx + 1} seleccionada — preparando impresión…"
-        )
-
-        # ── Fase 2: imprimir ──────────────────────────────────────────────
-        try:
-            from modules.fase2_print import imprimir_pagina
-        except ImportError as e:
-            QMessageBox.critical(self, "Error de módulo", str(e))
-            return
-
-        imprimio = imprimir_pagina(self._pdf_activo, pagina_idx)
-        if not imprimio:
-            self.status.showMessage("Impresión cancelada.")
-            return
-
-        self.status.showMessage("Página enviada a impresora — esperando escaneo…")
-
-        # ── Fase 3: escanear / adjuntar ───────────────────────────────────
-        try:
-            from modules.fase3_scan import obtener_imagen_firmada
-        except ImportError as e:
-            QMessageBox.critical(self, "Error de módulo", str(e))
-            return
-
-        imagen_pdf = obtener_imagen_firmada(self._pdf_activo, pagina_idx)
-        if imagen_pdf is None:
-            self.status.showMessage("Escaneo cancelado.")
-            return
-
-        self.status.showMessage("Imagen recibida — abriendo confirmación…")
-
-        # ── Fase 4: guardar ───────────────────────────────────────────────
-        # Pendiente de implementar en Parte 4 (fase_guardar.py).
-        # Por ahora llama al método provisional.
-        self._finalizar_trabajo(imagen_pdf, pagina_idx)
+    def _on_pagina_elegida(self, num_pagina: int):
+        # Guardamos la página para Fase 2 (Parte 3)
+        self.pagina_activa = num_pagina
+        # TODO: llamar fase2_print aquí en la Parte 3
+        print(f"[DEBUG] Página {num_pagina + 1} lista para imprimir")
 
     # ── Finalizar y guardar ───────────────────────────────────────────────
 
