@@ -154,6 +154,19 @@ The app auto-creates the `pdfs_trabajo/` and `pdfs_firmados/` directories on fir
 
 ---
 
+## Roadmap
+
+Planned improvements for upcoming versions:
+
+- [ ] **macOS support** — native printer and scanner integration via CUPS / ImageCapture
+- [ ] **Multi-page signing** — select and process multiple pages in a single session
+- [ ] **Batch document processing** — queue several PDFs and sign them sequentially
+- [ ] **Digital signature support** — embed cryptographic signatures without physical printing
+- [ ] **UI settings panel** — configure SMTP, default folders, and scanner from within the app
+- [ ] **Export as ZIP** — bundle the signed PDF alongside its scanned images for archiving
+
+---
+
 ## Technical Notes
 
 - Only **one PDF** can be in progress at a time; the "Open PDF" button disables until the current session is closed or completed.
