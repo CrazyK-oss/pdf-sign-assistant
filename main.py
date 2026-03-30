@@ -346,6 +346,9 @@ class VentanaPrincipal(QMainWindow):
         self.setMinimumSize(700, 580)
         self.config = _cargar_config()
         self._pdf_activo: Path | None = None
+        self._pagina_activa: int = 0
+        self._vista_preview  = None
+        self._vista_escaneo  = None
         self._build_ui()
         self._cargar_guardados_existentes()
 
@@ -607,8 +610,8 @@ class VentanaPrincipal(QMainWindow):
         if self._pdf_activo is None:
             return
 
-        # Limpiar vista anterior si ya existía
-        if hasattr(self, '_vista_preview') and self._vista_preview is not None:
+        # Cerrar vista anterior si quedó abierta
+        if self._vista_preview is not None:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
             self._vista_preview = None
@@ -616,45 +619,102 @@ class VentanaPrincipal(QMainWindow):
         self._vista_preview = VistaPrevisualizacion(str(self._pdf_activo))
         self._vista_preview.setWindowTitle("PDF Sign Assistant — Seleccionar página")
         self._vista_preview.resize(960, 680)
+        # pagina_seleccionada(int) se emite en fase1_preview cuando el usuario
+        # elige una página Y confirma imprimir (ImpresionPagina.imprimir devuelve True).
         self._vista_preview.pagina_seleccionada.connect(self._on_pagina_elegida)
         self._vista_preview.cancelar.connect(self._on_preview_cancelado)
         self._vista_preview.show()
 
     def _on_pagina_elegida(self, num_pagina: int):
+        """
+        Fase 2 → impresión directa.
+        ImpresionPagina.imprimir() abre el diálogo nativo del OS y devuelve
+        True si el usuario confirmó, False si canceló.
+        Si imprimió, cerramos el grid y abrimos la vista de escaneo.
+        """
         self._pagina_activa = num_pagina
-        if hasattr(self, '_vista_preview') and self._vista_preview:
+
+        # Cerrar el grid de páginas antes de lanzar el diálogo de impresión
+        if self._vista_preview is not None:
             self._vista_preview.close()
+            self._vista_preview.deleteLater()
+            self._vista_preview = None
 
-        from modules.fase2_print import VistaPaginaImpresion
-        self._vista_impresion = VistaPaginaImpresion(
-            str(self._pdf_activo), num_pagina
+        from modules.fase2_print import ImpresionPagina
+        imprimio = ImpresionPagina.imprimir(
+            str(self._pdf_activo), num_pagina, parent=self
         )
-        self._vista_impresion.listo_para_escanear.connect(
-            self._on_listo_para_escanear
-        )
-        self._vista_impresion.cancelar.connect(self._on_flujo_cancelado)
-        self._vista_impresion.show()
 
-    def _on_listo_para_escanear(self, num_pagina: int):
+        if not imprimio:
+            # Usuario canceló el diálogo de impresión → volvemos al grid
+            self.status.showMessage("Impresión cancelada — podés elegir otra página.")
+            self._iniciar_flujo_trabajo()
+            return
+
+        # Impresión enviada → pasar a Fase 3 (escaneo)
+        self.status.showMessage(
+            f"Página {num_pagina + 1} enviada a la impresora. Esperando escaneo…"
+        )
+        self._abrir_escaneo(num_pagina)
+
+    def _abrir_escaneo(self, num_pagina: int):
+        """
+        Fase 3 → VistaEscaneo.
+        Firma correcta: VistaEscaneo(ruta_pdf: str, num_pagina: int)
+        Señal de salida correcta: imagen_lista(str)  → ruta de la imagen escaneada.
+        """
+        # Cerrar instancia anterior si quedó abierta
+        if self._vista_escaneo is not None:
+            self._vista_escaneo.close()
+            self._vista_escaneo.deleteLater()
+            self._vista_escaneo = None
+
         from modules.fase3_scan import VistaEscaneo
-        self._vista_escaneo = VistaEscaneo(num_pagina)
-        self._vista_escaneo.pagina_confirmada.connect(self._on_pagina_escaneada)
-        self._vista_escaneo.cancelar.connect(self._on_flujo_cancelado)
+        self._vista_escaneo = VistaEscaneo(
+            str(self._pdf_activo), num_pagina, parent=self
+        )
+        self._vista_escaneo.setWindowTitle("PDF Sign Assistant — Escanear página")
+        self._vista_escaneo.resize(820, 560)
+        self._vista_escaneo.imagen_lista.connect(self._on_imagen_escaneada)
+        self._vista_escaneo.cancelar.connect(self._on_escaneo_cancelado)
         self._vista_escaneo.show()
 
-    def _on_pagina_escaneada(self, ruta_pdf: str):
-        # → llamará fase_guardar en la Parte 4
-        self.status.showMessage(
-            f"Página lista para guardar — {Path(ruta_pdf).name}"
-        )
-        print(f"[DEBUG] Nueva página PDF lista: {ruta_pdf}")
+    def _on_imagen_escaneada(self, ruta_imagen: str):
+        """
+        Recibe la ruta de la imagen (PNG/JPG) escaneada.
+        Fase 4 (fase_guardar.py) tomará esta imagen y la página activa
+        para reemplazar la página en el PDF y guardar el resultado.
+        TODO: conectar con fase_guardar en la Parte 4.
+        """
+        if self._vista_escaneo is not None:
+            self._vista_escaneo.close()
+            self._vista_escaneo.deleteLater()
+            self._vista_escaneo = None
 
-    def _on_flujo_cancelado(self):
-        self.status.showMessage("Operación cancelada.")
+        self.status.showMessage(
+            f"Imagen lista — página {self._pagina_activa + 1} · "
+            f"{Path(ruta_imagen).name}  →  pendiente guardar (Parte 4)"
+        )
+        # Placeholder hasta Parte 4:
+        print(f"[DEBUG] ruta_imagen={ruta_imagen}  pagina_idx={self._pagina_activa}")
+
+    def _on_escaneo_cancelado(self):
+        """
+        Usuario presionó '← Volver a páginas' en VistaEscaneo.
+        Reabrimos el grid para que pueda elegir otra página.
+        """
+        if self._vista_escaneo is not None:
+            self._vista_escaneo.close()
+            self._vista_escaneo.deleteLater()
+            self._vista_escaneo = None
+        self.status.showMessage("Escaneo cancelado — volviendo al grid de páginas.")
+        self._iniciar_flujo_trabajo()
 
     def _on_preview_cancelado(self):
-        if hasattr(self, '_vista_preview') and self._vista_preview:
+        if self._vista_preview is not None:
             self._vista_preview.close()
+            self._vista_preview.deleteLater()
+            self._vista_preview = None
         self.status.showMessage("Vista de páginas cerrada.")
 
     # ── Finalizar y guardar ───────────────────────────────────────────────

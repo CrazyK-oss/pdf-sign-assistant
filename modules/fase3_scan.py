@@ -62,7 +62,10 @@ class WIAScanWorker(QThread):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  Zona de drag & drop (también abre el selector de archivos al hacer clic)
+#  Zona de drag & drop
+#  NOTA: el clic para abrir el explorador lo maneja el botón "Examinar"
+#  externo — ZonaDrop NO implementa mousePressEvent para evitar que se
+#  duplique el QFileDialog cuando el usuario hace clic en el botón.
 # ─────────────────────────────────────────────────────────────────────────
 class ZonaDrop(QFrame):
     imagen_soltada = pyqtSignal(str)
@@ -79,7 +82,6 @@ class ZonaDrop(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setMinimumHeight(120)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_estado_normal()
 
         lay = QVBoxLayout(self)
@@ -93,7 +95,7 @@ class ZonaDrop(QFrame):
         )
         lay.addWidget(self.lbl_icono)
 
-        lbl_txt = QLabel("Arrastra una imagen aquí\no haz clic para buscarla")
+        lbl_txt = QLabel("Arrastra una imagen aquí")
         lbl_txt.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_txt.setStyleSheet(
             "color: #7a7974; font-size: 12px; border: none; background: transparent;"
@@ -129,17 +131,6 @@ class ZonaDrop(QFrame):
         if e.mimeData().hasUrls():
             ruta = e.mimeData().urls()[0].toLocalFile()
             self.imagen_soltada.emit(ruta)
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            ruta, _ = QFileDialog.getOpenFileName(
-                self,
-                "Seleccionar imagen escaneada",
-                os.path.expanduser("~"),
-                "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp)"
-            )
-            if ruta:
-                self.imagen_soltada.emit(ruta)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -539,6 +530,7 @@ class VistaEscaneo(QWidget):
 
     def _on_cambiar_imagen(self):
         self._ruta_img = None
+        self.lbl_prev_img.clear()   # limpiar pixmap anterior
         self.panel_preview.hide()
         self.btn_usar.setEnabled(False)
         self.lbl_estado_inf.setText("Esperando imagen…")

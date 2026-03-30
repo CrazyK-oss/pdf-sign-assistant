@@ -5,7 +5,7 @@
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QMessageBox
 
 try:
@@ -61,13 +61,12 @@ class ImpresionPagina:
 
         # Detectar orientación real de la página en el PDF
         try:
-            doc_tmp = fitz.open(ruta_pdf)
-            rect = doc_tmp[num_pagina].rect   # unidades: puntos tipográficos (1pt = 1/72 in)
-            doc_tmp.close()
-            if rect.width > rect.height:
-                printer.setPageOrientation(QPrinter.Orientation.Landscape)
-            else:
-                printer.setPageOrientation(QPrinter.Orientation.Portrait)
+            with fitz.open(ruta_pdf) as doc_tmp:
+                rect = doc_tmp[num_pagina].rect  # unidades: puntos tipográficos (1pt = 1/72 in)
+                if rect.width > rect.height:
+                    printer.setPageOrientation(QPrinter.Orientation.Landscape)
+                else:
+                    printer.setPageOrientation(QPrinter.Orientation.Portrait)
         except Exception:
             pass  # Si falla, dejamos la orientación por defecto del sistema
 
@@ -103,8 +102,10 @@ class ImpresionPagina:
             return False
 
         # ── 4. Convertir pixmap a QImage ────────────────────────────────
+        # bytes() explícito: pix.samples puede ser memoryview en versiones
+        # recientes de PyMuPDF, y QImage necesita un buffer de bytes estable.
         img = QImage(
-            pix.samples,       # buffer de bytes RGB
+            bytes(pix.samples),
             pix.width,
             pix.height,
             pix.stride,        # bytes por fila
@@ -124,20 +125,21 @@ class ImpresionPagina:
             return False
 
         try:
-            # Escalar la imagen para ocupar toda la página, respetando proporción
+            # Escalar la imagen para ocupar toda la página respetando proporción,
+            # y centrarla. Usamos drawImage(QRect, QImage) en lugar de
+            # setViewport/setWindow, que en Qt6 puede deformar si los márgenes
+            # físicos de la impresora tienen dimensiones impares.
             viewport = painter.viewport()
             img_size = img.size().scaled(
                 viewport.size(),
                 Qt.AspectRatioMode.KeepAspectRatio
             )
 
-            # Centrar horizontalmente y verticalmente en la página
             x_off = (viewport.width()  - img_size.width())  // 2
             y_off = (viewport.height() - img_size.height()) // 2
 
-            painter.setViewport(x_off, y_off, img_size.width(), img_size.height())
-            painter.setWindow(img.rect())
-            painter.drawImage(0, 0, img)
+            dest_rect = QRect(x_off, y_off, img_size.width(), img_size.height())
+            painter.drawImage(dest_rect, img)
 
         finally:
             painter.end()   # Siempre liberar el painter, incluso si hay excepción
