@@ -1,99 +1,169 @@
 # PDF Sign Assistant
 
-App de escritorio en Python para automatizar el flujo de trabajo de firma de documentos legales.
-Diseñada para usuarios no técnicos con interfaz simple, botones grandes y retroalimentación clara.
+> Desktop application built with Python + PyQt6 to automate the complete signing workflow for legal documents — designed for non-technical users with a clean, guided UI.
 
-## Flujo de uso
+---
 
-1. **Seleccionar documento**: Elige el PDF que necesita firmar desde la carpeta `documents/`
-2. **Seleccionar páginas**: Vista previa visual; toca las páginas que necesitas imprimir y firmar
-3. **Imprimir**: La app imprime solo las páginas seleccionadas y espera que las firmes físicamente
-4. **Escanear**: Escanea cada página firmada; la app las reemplaza automáticamente en el PDF
-5. **Enviar**: Ingresa el correo del destinatario, revisa el resumen y envía
+## Overview
 
-## Estructura del proyecto
+**PDF Sign Assistant** streamlines the process of physically signing PDF documents and producing a digitally-updated copy. Instead of manually editing PDFs or managing scanned images, the app guides the user through a step-by-step flow: preview pages → print → scan → embed → save → send.
+
+All interactions are handled from a single window with large, clearly labelled controls and real-time status feedback.
+
+---
+
+## Features
+
+- 📄 **Page preview grid** — visualize all pages of a PDF before choosing which one to sign
+- 🖨️ **Direct print** — sends a single page to the system printer automatically
+- 🖼️ **Scan integration** — load or capture a scanned image of the signed page
+- 🔄 **Page replacement** — embeds the scanned signature back into the original PDF at the correct position
+- 💾 **Saved jobs list** — keeps a history of processed documents with timestamps; supports re-editing
+- ✉️ **Email dispatch** — sends the signed document via SMTP directly from the app
+- 🔒 **Safe cancellation** — cancel at any stage without corrupting the original file
+
+---
+
+## Workflow
+
+```
+Open PDF  →  Preview Pages  →  Print Page  →  Scan Signed Page  →  Save PDF  →  Send by Email
+```
+
+| Step | Module | Description |
+|------|--------|-------------|
+| 1 | `main.py` | Open a PDF and load it into the working session |
+| 2 | `fase1_preview.py` | Display a scrollable grid of page thumbnails; select the target page |
+| 3 | `fase2_print.py` | Send the selected page to the system printer |
+| 4 | `fase3_scan.py` | Load the scanned/photographed signed page image |
+| 5 | `fase_guardar.py` | Preview the result, confirm, and save the signed PDF |
+| 6 | `fase4_email.py` | Send the final document via email using SMTP |
+
+---
+
+## Project Structure
 
 ```
 pdf-sign-assistant/
-├── main.py                  # Punto de entrada y flujo principal
-├── config.json              # Configuración (credenciales SMTP, rutas)
-├── requirements.txt         # Dependencias Python
-├── README.md
-├── documents/               # PDFs originales (NO se suben al repo)
-├── scans/                   # Escaneos temporales (NO se suben al repo)
-├── temp/                    # Archivos temporales (NO se suben al repo)
+├── main.py                  # Entry point · main window · workflow orchestration
+├── config.json              # SMTP credentials and folder paths
+├── config.example.env       # Environment variable template
+├── requirements.txt         # Python dependencies
+├── pdfs_trabajo/            # Temporary working copies (auto-created, gitignored)
+├── pdfs_firmados/           # Final signed documents (auto-created, gitignored)
 └── modules/
     ├── __init__.py
-    ├── setup.py             # Configuración y creación de carpetas
-    ├── fase1_preview.py     # Vista previa y selección de páginas
-    ├── fase2_print.py       # Impresión de páginas seleccionadas
-    ├── fase3_scan.py        # Escaneo y reemplazo de páginas
-    └── fase4_email.py       # Envío por correo con resumen
+    ├── setup.py             # Folder setup and initialization helpers
+    ├── fase1_preview.py     # Page thumbnail grid and selection
+    ├── fase2_print.py       # System printer integration
+    ├── fase3_scan.py        # Scan/image loading and preview
+    ├── fase_guardar.py      # Page replacement and PDF save logic
+    └── fase4_email.py       # SMTP email sending with PDF attachment
 ```
 
-## Setup
+---
 
-### 1. Requisitos previos
+## Prerequisites
 
-- Python 3.10+
-- **Poppler** (requerido por `pdf2image`):
-  - **Windows**: Descargar de https://github.com/oschwartz10612/poppler-windows/releases/ y agregar la carpeta `bin` al PATH
+- **Python** 3.10 or higher
+- **Poppler** — required by `pdf2image` for PDF rendering:
+  - **Windows**: Download from [oschwartz10612/poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases/) and add the `bin/` folder to your system `PATH`
   - **Linux**: `sudo apt-get install poppler-utils`
   - **macOS**: `brew install poppler`
-- **Escáner compatible**:
-  - Linux: `scanimage` (paquete `sane-utils`)
-  - Windows: WIA (incluido en Windows, compatible con HP Laser MFP 135w)
+- **Compatible scanner** *(optional — images can also be loaded from disk)*:
+  - Linux: `scanimage` via `sane-utils`
+  - Windows: WIA (built-in, compatible with HP LaserJet MFP series)
 
-### 2. Instalación
+---
+
+## Installation
 
 ```bash
-# Clonar repositorio
+# 1. Clone the repository
 git clone https://github.com/CrazyK-oss/pdf-sign-assistant.git
 cd pdf-sign-assistant
 
-# Crear entorno virtual
+# 2. Create a virtual environment
 python -m venv venv
 
-# Activar entorno
+# 3. Activate it
 venv\Scripts\activate        # Windows
-source venv/bin/activate     # Linux/macOS
+source venv/bin/activate     # Linux / macOS
 
-# Instalar dependencias
+# 4. Install dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Configurar config.json
+---
 
-Edita `config.json` con tus credenciales reales:
+## Configuration
+
+### `config.json` — SMTP & folder settings
+
+Edit this file with your email credentials before running the app:
 
 ```json
 {
-    "email_user": "tucorreo@gmail.com",
-    "email_password": "tu_contraseña_de_aplicacion",
+    "email_user": "your_email@domain.com",
+    "email_password": "your_app_password",
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
-    "documents_folder": "documents",
-    "scans_folder": "scans",
-    "temp_folder": "temp"
+    "documents_folder": "./documents",
+    "scans_folder": "./scans",
+    "temp_folder": "./temp"
 }
 ```
 
-> **Nota para Gmail**: Usa una *Contraseña de Aplicación* (no tu contraseña normal).  
-> Actívala en: Google Account → Seguridad → Verificación en dos pasos → Contraseñas de aplicación
+### `.env` — environment variable override *(optional)*
 
-### 4. Colocar documentos
+Copy `config.example.env` to `.env` and fill in your credentials:
 
-Copia los PDFs originales que necesitas firmar a la carpeta `documents/`.
+```env
+EMAIL_REMITENTE=your_email@domain.com
+EMAIL_PASSWORD=your_app_password_here
+```
 
-### 5. Ejecutar
+> **Gmail users:** Use an *App Password*, not your regular account password.  
+> Enable it at: **Google Account → Security → 2-Step Verification → App Passwords**
+
+---
+
+## Running the App
 
 ```bash
 python main.py
 ```
 
-## Notas técnicas
+The app auto-creates the `pdfs_trabajo/` and `pdfs_firmados/` directories on first launch. No additional setup required.
 
-- Las carpetas `documents/`, `scans/` y `temp/` se crean automáticamente al iniciar la app
-- Los archivos temporales de escaneo se guardan en `scans/` con nombres `scan_001.tiff`, `scan_002.tiff`, etc.
-- El PDF firmado final se guarda en `temp/documento_firmado.pdf` antes de enviarse
-- Todos los errores muestran mensajes amigables al usuario y se registran en la consola para depuración
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `PyQt6` | Desktop GUI framework |
+| `pymupdf` | PDF parsing and page rendering |
+| `Pillow` | Image processing and format conversion |
+| `img2pdf` | Image-to-PDF conversion |
+| `pypdf` | PDF manipulation (page replacement) |
+| `reportlab` | PDF generation utilities |
+| `watchdog` | Filesystem event monitoring |
+| `pywin32` | Windows printer and WIA scanner integration |
+| `python-dotenv` | `.env` file loading |
+
+---
+
+## Technical Notes
+
+- Only **one PDF** can be in progress at a time; the "Open PDF" button disables until the current session is closed or completed.
+- Working copies are stored in `pdfs_trabajo/` and cleaned up automatically after saving or cancelling.
+- Signed documents are persisted in `pdfs_firmados/` and listed in the main window with modification timestamps.
+- Double-clicking a saved document reopens it for re-editing without modifying the original.
+- All errors surface as user-friendly dialogs; detailed tracebacks are printed to the console for debugging.
+
+---
+
+## License
+
+This project is private and not open for redistribution. All rights reserved.
