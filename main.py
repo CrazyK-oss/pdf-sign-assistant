@@ -1,181 +1,104 @@
-"""
-main.py — Punto de entrada autónomo del PDF Sign Assistant.
-
-Primera vez:  python main.py  →  crea venv, instala dependencias, relanza la app.
-Siguientes:   python main.py  →  arranca directo, sin comandos extra.
-"""
-
 import sys
-import os
-import subprocess
+import shutil
 from pathlib import Path
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QHBoxLayout, QPushButton, QLabel, QFileDialog,
+    QListWidget, QMessageBox
+)
+from PyQt6.QtCore import Qt
 
-BASE_DIR = Path(__file__).parent.resolve()
-VENV_DIR = BASE_DIR / "venv"
-REQUIREMENTS = BASE_DIR / "requirements.txt"
-
-# --------------------------------------------------------------------------- #
-#  Detectar si ya estamos corriendo DENTRO del venv                           #
-# --------------------------------------------------------------------------- #
-def _running_in_venv() -> bool:
-    return (
-        hasattr(sys, "real_prefix")
-        or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
-    )
+CARPETA_TRABAJO = Path(__file__).parent / "pdfs_trabajo"
+CARPETA_TRABAJO.mkdir(exist_ok=True)
 
 
-# --------------------------------------------------------------------------- #
-#  Crear venv si no existe                                                    #
-# --------------------------------------------------------------------------- #
-def _ensure_venv():
-    if not VENV_DIR.exists():
-        print("[SETUP] Creando entorno virtual por primera vez...")
-        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-        print("[SETUP] Entorno virtual creado.")
+class VentanaPrincipal(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PDF Sign Assistant")
+        self.setMinimumSize(700, 500)
+        self.pdfs_cargados = []
+        self._construir_ui()
 
+    def _construir_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
 
-# --------------------------------------------------------------------------- #
-#  Ruta al Python/pip dentro del venv                                         #
-# --------------------------------------------------------------------------- #
-def _venv_python() -> Path:
-    if sys.platform == "win32":
-        return VENV_DIR / "Scripts" / "python.exe"
-    return VENV_DIR / "bin" / "python"
+        # Botón buscar PDFs
+        btn_buscar = QPushButton("📂  Buscar PDFs...")
+        btn_buscar.setFixedHeight(40)
+        btn_buscar.clicked.connect(self.buscar_pdfs)
+        layout.addWidget(btn_buscar)
 
+        # Lista de PDFs cargados
+        self.lista = QListWidget()
+        layout.addWidget(self.lista)
 
-def _venv_pip() -> Path:
-    if sys.platform == "win32":
-        return VENV_DIR / "Scripts" / "pip.exe"
-    return VENV_DIR / "bin" / "pip"
+        # Etiqueta carpeta de trabajo
+        self.lbl_carpeta = QLabel(f"Carpeta de trabajo: {CARPETA_TRABAJO}")
+        self.lbl_carpeta.setWordWrap(True)
+        layout.addWidget(self.lbl_carpeta)
 
+        # Botones de acción
+        fila_botones = QHBoxLayout()
+        btn_firmar = QPushButton("✍️  Firmar seleccionado")
+        btn_firmar.setFixedHeight(36)
+        btn_firmar.clicked.connect(self.firmar_pdf)
 
-# --------------------------------------------------------------------------- #
-#  Instalar dependencias                                                      #
-# --------------------------------------------------------------------------- #
-def _ensure_deps():
-    print("[SETUP] Verificando dependencias...")
-    subprocess.check_call(
-        [str(_venv_pip()), "install", "--quiet", "--upgrade", "pip"],
-    )
-    subprocess.check_call(
-        [str(_venv_pip()), "install", "--quiet", "-r", str(REQUIREMENTS)],
-    )
-    print("[SETUP] Dependencias listas.")
+        btn_limpiar = QPushButton("🗑️  Limpiar lista")
+        btn_limpiar.setFixedHeight(36)
+        btn_limpiar.clicked.connect(self.limpiar_lista)
 
+        fila_botones.addWidget(btn_firmar)
+        fila_botones.addWidget(btn_limpiar)
+        layout.addLayout(fila_botones)
 
-# --------------------------------------------------------------------------- #
-#  Relanzar con el Python del venv                                            #
-# --------------------------------------------------------------------------- #
-def _relaunch_in_venv():
-    print("[SETUP] Relanzando dentro del entorno virtual...\n")
-    os.execv(str(_venv_python()), [str(_venv_python())] + sys.argv)
+    def buscar_pdfs(self):
+        """Abre diálogo para buscar PDFs desde cualquier ubicación."""
+        rutas, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Seleccionar PDFs",
+            str(Path.home()),       # arranca en el home del usuario
+            "Archivos PDF (*.pdf)"
+        )
+        if not rutas:
+            return
 
+        for ruta_str in rutas:
+            origen = Path(ruta_str)
+            destino = CARPETA_TRABAJO / origen.name
 
-# --------------------------------------------------------------------------- #
-#  Bootstrap: sólo corre si NO estamos dentro del venv                       #
-# --------------------------------------------------------------------------- #
-if not _running_in_venv():
-    _ensure_venv()
-    _ensure_deps()
-    _relaunch_in_venv()
+            # Evitar duplicados
+            if destino.exists():
+                destino = CARPETA_TRABAJO / f"{origen.stem}_copia{origen.suffix}"
 
+            shutil.copy2(origen, destino)
+            self.pdfs_cargados.append(destino)
+            self.lista.addItem(str(destino))
 
-# --------------------------------------------------------------------------- #
-#  A partir de aquí el código corre SIEMPRE dentro del venv                  #
-# --------------------------------------------------------------------------- #
-import PySimpleGUI as sg  # noqa: E402  (importación después del bootstrap)
-from modules.setup import setup_directories, load_config
-from modules.fase1_preview import seleccionar_paginas
-from modules.fase2_print import imprimir_paginas
-from modules.fase3_scan import escanear_y_reemplazar
-from modules.fase4_email import enviar_documento
+    def firmar_pdf(self):
+        """Procesa el PDF seleccionado en la lista."""
+        item = self.lista.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Aviso", "Selecciona un PDF de la lista primero.")
+            return
+        ruta = Path(item.text())
+        # TODO: lógica de firma aquí
+        QMessageBox.information(self, "OK", f"Firmando: {ruta.name}")
+
+    def limpiar_lista(self):
+        self.lista.clear()
+        self.pdfs_cargados.clear()
 
 
 def main():
-    base_dir = setup_directories()
-    config = load_config()
-
-    sg.theme("LightGreen2")
-
-    while True:
-        docs_dir = base_dir / "documents"
-        pdf_files = list(docs_dir.glob("*.pdf"))
-
-        if not pdf_files:
-            sg.popup_error(
-                f"No se encontraron PDFs en:\n{docs_dir}\n"
-                "Por favor coloque al menos un PDF en la carpeta 'documents'."
-            )
-            break
-
-        # --- PANTALLA DE INICIO: Selección de documento ---
-        layout_inicio = [
-            [sg.Text("Seleccione el documento a firmar:", font=("Helvetica", 16, "bold"))],
-            [
-                sg.Listbox(
-                    values=[f.name for f in pdf_files],
-                    size=(50, min(10, len(pdf_files))),
-                    key="-DOC-",
-                    font=("Helvetica", 13),
-                    enable_events=True,
-                )
-            ],
-            [
-                sg.Button("SALIR", size=(12, 1), button_color=("white", "#dc3545")),
-                sg.Button(
-                    "CONTINUAR",
-                    size=(12, 1),
-                    button_color=("white", "#007BFF"),
-                    disabled=True,
-                    key="-BTN-CONTINUAR-",
-                ),
-            ],
-        ]
-
-        win_inicio = sg.Window(
-            "Asistente de Firmas Legales",
-            layout_inicio,
-            element_justification="c",
-            finalize=True,
-        )
-
-        doc_seleccionado = None
-        while True:
-            ev, vals = win_inicio.read()
-            if ev in (sg.WIN_CLOSED, "SALIR"):
-                win_inicio.close()
-                return
-            if ev == "-DOC-" and vals["-DOC-"]:
-                doc_seleccionado = docs_dir / vals["-DOC-"][0]
-                win_inicio["-BTN-CONTINUAR-"].update(disabled=False)
-            if ev == "-BTN-CONTINUAR-" and doc_seleccionado:
-                break
-        win_inicio.close()
-
-        # --- EJECUTAR FASES EN SECUENCIA ---
-        try:
-            # FASE 1: Vista previa y selección de páginas
-            paginas = seleccionar_paginas(doc_seleccionado)
-            if paginas is None:
-                continue  # Usuario canceló, volver a inicio
-
-            # FASE 2: Imprimir páginas seleccionadas
-            temp_print = base_dir / "temp" / "paginas_a_imprimir.pdf"
-            if not imprimir_paginas(doc_seleccionado, paginas, temp_print):
-                continue
-
-            # FASE 3: Escanear y reemplazar páginas en el PDF original
-            scans_dir = base_dir / "scans"
-            temp_firmado = base_dir / "temp" / "documento_firmado.pdf"
-            if not escanear_y_reemplazar(doc_seleccionado, paginas, scans_dir, temp_firmado):
-                continue
-
-            # FASE 4: Resumen y envío por email
-            enviar_documento(temp_firmado, config, paginas, doc_seleccionado.name)
-
-        except Exception as e:
-            sg.popup_error(f"Error inesperado:\n{e}")
-            print(f"[ERROR MAIN] {e}")
+    app = QApplication(sys.argv)
+    ventana = VentanaPrincipal()
+    ventana.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
