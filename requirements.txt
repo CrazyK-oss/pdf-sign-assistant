@@ -4,3 +4,4 @@ Pillow
 img2pdf
 pypdf
 watchdog
+pywin32

@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
+from modules.fase1_preview import VistaPrevisualizacion
+
 
 # ── Bootstrap: instala dependencias si faltan ────────────────────────────────
 def _instalar_deps():
@@ -601,27 +603,59 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Flujo de trabajo principal ────────────────────────────────────────
 
-    # En main.py — método _iniciar_flujo_trabajo
-    from modules.fase1_preview import VistaPrevisualizacion
-
     def _iniciar_flujo_trabajo(self):
-        # Limpiar vista anterior si existe
-        if hasattr(self, '_vista_preview') and self._vista_preview:
-            self.stack.removeWidget(self._vista_preview)
+        if self._pdf_activo is None:
+            return
+
+        # Limpiar vista anterior si ya existía
+        if hasattr(self, '_vista_preview') and self._vista_preview is not None:
+            self._vista_preview.close()
             self._vista_preview.deleteLater()
+            self._vista_preview = None
 
-        self._vista_preview = VistaPrevisualizacion(self.pdf_activo)
+        self._vista_preview = VistaPrevisualizacion(str(self._pdf_activo))
+        self._vista_preview.setWindowTitle("PDF Sign Assistant — Seleccionar página")
+        self._vista_preview.resize(960, 680)
         self._vista_preview.pagina_seleccionada.connect(self._on_pagina_elegida)
-        self._vista_preview.cancelar.connect(self._cancelar_pdf_activo)
-
-        self.stack.addWidget(self._vista_preview)
-        self.stack.setCurrentWidget(self._vista_preview)
+        self._vista_preview.cancelar.connect(self._on_preview_cancelado)
+        self._vista_preview.show()
 
     def _on_pagina_elegida(self, num_pagina: int):
-        # Guardamos la página para Fase 2 (Parte 3)
-        self.pagina_activa = num_pagina
-        # TODO: llamar fase2_print aquí en la Parte 3
-        print(f"[DEBUG] Página {num_pagina + 1} lista para imprimir")
+        self._pagina_activa = num_pagina
+        if hasattr(self, '_vista_preview') and self._vista_preview:
+            self._vista_preview.close()
+
+        from modules.fase2_print import VistaPaginaImpresion
+        self._vista_impresion = VistaPaginaImpresion(
+            str(self._pdf_activo), num_pagina
+        )
+        self._vista_impresion.listo_para_escanear.connect(
+            self._on_listo_para_escanear
+        )
+        self._vista_impresion.cancelar.connect(self._on_flujo_cancelado)
+        self._vista_impresion.show()
+
+    def _on_listo_para_escanear(self, num_pagina: int):
+        from modules.fase3_scan import VistaEscaneo
+        self._vista_escaneo = VistaEscaneo(num_pagina)
+        self._vista_escaneo.pagina_confirmada.connect(self._on_pagina_escaneada)
+        self._vista_escaneo.cancelar.connect(self._on_flujo_cancelado)
+        self._vista_escaneo.show()
+
+    def _on_pagina_escaneada(self, ruta_pdf: str):
+        # → llamará fase_guardar en la Parte 4
+        self.status.showMessage(
+            f"Página lista para guardar — {Path(ruta_pdf).name}"
+        )
+        print(f"[DEBUG] Nueva página PDF lista: {ruta_pdf}")
+
+    def _on_flujo_cancelado(self):
+        self.status.showMessage("Operación cancelada.")
+
+    def _on_preview_cancelado(self):
+        if hasattr(self, '_vista_preview') and self._vista_preview:
+            self._vista_preview.close()
+        self.status.showMessage("Vista de páginas cerrada.")
 
     # ── Finalizar y guardar ───────────────────────────────────────────────
 
