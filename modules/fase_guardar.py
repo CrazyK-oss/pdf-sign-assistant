@@ -14,12 +14,21 @@ Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Correcciones críticas (v3)
+Correcciones críticas (v4)
 ---------------------------
+* BUGFIX PRINCIPAL: race condition al emitir guardado_listo.
+  Antes: _on_listo() emitía guardado_listo() directamente desde la señal
+  del worker, lo que hacía que main.py destruyera FaseGuardar (deleteLater)
+  mientras el QThread todavía no había completado su ciclo finished →
+  señales huérfanas → crash.
+  Ahora: _on_listo() solo guarda la ruta pendiente. La emisión real de
+  guardado_listo ocurre en _on_finished_thread(), conectado a
+  self._worker.finished, que se dispara DESPUÉS de que run() retorna y
+  el hilo está completamente cerrado.
+* closeEvent espera con wait() si el worker terminó pero deleteLater
+  todavía está pendiente, para no dejar objetos colgados.
 * _WorkerGuardar NO recibe parent= para evitar que Qt lo destruya
   prematuramente cuando el widget hace deleteLater.
-* finished del QThread se conecta a su propio deleteLater (patrón Qt
-  correcto para threads de un solo uso).
 * Guard anti-doble-disparo en _on_guardar.
 * FaseGuardar hereda de QDialog en lugar de QWidget; así se muestra
   como ventana independiente y no se embebe en el parent QMainWindow.
@@ -157,11 +166,14 @@ class FaseGuardar(QDialog):
             Qt.WindowType.Window |
             Qt.WindowType.WindowCloseButtonHint
         )
-        self._ruta_pdf         = ruta_pdf
-        self._ruta_imagen      = ruta_imagen
-        self._num_pagina       = num_pagina
-        self._carpeta_firmados = carpeta_firmados
+        self._ruta_pdf              = ruta_pdf
+        self._ruta_imagen           = ruta_imagen
+        self._num_pagina            = num_pagina
+        self._carpeta_firmados      = carpeta_firmados
         self._worker: _WorkerGuardar | None = None
+        # Ruta pendiente de emitir; se establece en _on_listo y se
+        # consume en _on_finished_thread para evitar la race condition.
+        self._ruta_final_pendiente: str | None = None
         self._construir_ui()
 
     # ── UI ────────────────────────────────────────────────────────────
@@ -490,6 +502,7 @@ class FaseGuardar(QDialog):
             if resp != QMessageBox.StandardButton.Yes:
                 return
 
+        self._ruta_final_pendiente = None
         self._set_guardando(True)
 
         # ── Crear worker SIN parent= (ver docstring de clase) ────────
@@ -502,7 +515,10 @@ class FaseGuardar(QDialog):
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
-        # El thread se auto-destruye una vez que finished dispara
+        # ── FIX race condition: guardado_listo se emite DESDE finished,
+        #    no desde listo. Así nos aseguramos que el QThread completó
+        #    su ciclo completo antes de que main.py destruya FaseGuardar.
+        self._worker.finished.connect(self._on_finished_thread)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
@@ -535,12 +551,31 @@ class FaseGuardar(QDialog):
         self.lbl_progreso_etapa.setText(etiqueta)
 
     def _on_listo(self, ruta_str: str):
+        # Solo guardamos la ruta; la emisión real ocurre en _on_finished_thread
+        # para garantizar que el QThread terminó completamente antes de que
+        # main.py destruya este widget.
+        self._ruta_final_pendiente = ruta_str
+
+    def _on_finished_thread(self):
+        """
+        Se dispara cuando el QThread completó su ciclo finished —
+        DESPUÉS de que run() retornó y el hilo está cerrado.
+        Es el momento seguro para notificar a main.py y dejar que
+        destruya FaseGuardar sin señales huérfanas pendientes.
+        """
         self._limpiar_worker()
         self._set_guardando(False)
-        self.guardado_listo.emit(Path(ruta_str))
+
+        if self._ruta_final_pendiente is not None:
+            ruta = self._ruta_final_pendiente
+            self._ruta_final_pendiente = None
+            self.guardado_listo.emit(Path(ruta))
+        # Si _ruta_final_pendiente es None significa que el worker terminó
+        # con error (ya manejado por _on_error), no hacemos nada más.
 
     def _on_error(self, mensaje: str):
-        self._limpiar_worker()
+        # No limpiamos el worker aquí; lo hace _on_finished_thread
+        # cuando finished se dispare justo después.
         self._set_guardando(False)
         QMessageBox.critical(
             self,
@@ -560,4 +595,8 @@ class FaseGuardar(QDialog):
         if self._worker is not None and self._worker.isRunning():
             event.ignore()
             return
+        # Si el worker terminó pero su deleteLater está pendiente, esperamos
+        # el join para no dejar el hilo colgado al destruir el widget.
+        if self._worker is not None:
+            self._worker.wait()
         super().closeEvent(event)
