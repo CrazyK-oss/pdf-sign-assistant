@@ -12,24 +12,26 @@ Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Correcciones críticas (v6)
+Correcciones críticas (v7)
 ---------------------------
-* BUGFIX PRINCIPAL (v6): QMetaObject.invokeMethod + Q_ARG es API de PyQt5.
-  En PyQt6, Q_ARG existe pero no acepta tipos Python arbitrarios de esa
-  forma → crash silencioso / TypeError al despachar el método.
-  Solución correcta para PyQt6: señal interna _despachar_guardado_listo(str)
-  conectada con Qt.ConnectionType.QueuedConnection al slot _emitir_guardado_listo.
-  Así el despacho queda encolado en el event loop sin necesidad de invokeMethod.
+* BUGFIX PRINCIPAL (v7): img2pdf puede crashear el hilo sin lanzar una
+  excepción Python visible (error interno de C / pikepdf / etc.) dejando el
+  log cortado en el 10 %. Solución: Pillow es ahora el motor PRINCIPAL de
+  conversión imagen→PDF. img2pdf se intenta primero como optimización (sin
+  recompresión JPEG) pero cualquier fallo —incluidos los que no son
+  ImportError— cae silenciosamente al path de Pillow con log de advertencia.
+  Logging granular antes y después de cada llamada a librería externa para
+  que nunca más haya un "murió en silencio".
 
-* BLINDAJE COMPLETO (v6): logging detallado en cada etapa del worker y en
-  todos los slots del widget para que cualquier excepción quede visible en
-  la consola en lugar de tragarse en silencio.
+* BLINDAJE DE MODO DE COLOR (v7): se normaliza el modo de la imagen antes de
+  guardar con Pillow. Modos soportados para PDF: RGB y L (escala de grises).
+  Cualquier otro (RGBA, P, CMYK, LAB, …) se convierte a RGB con fondo blanco
+  para RGBA/PA o directamente para el resto.
 
-* GUARD EXTRA (v6): _on_finished_thread ya no ejecuta lógica si el widget
-  fue destruido (chequea sip.isdeleted cuando está disponible).
-
-* Conservado de v5: worker sin parent=, _ruta_final_pendiente, closeEvent
-  con wait(), guard anti-doble-disparo en _on_guardar, herencia de QDialog.
+* Conservado de v6: señal interna _despachar_guardado_listo con
+  QueuedConnection, logging detallado en todos los slots, guard
+  anti-doble-disparo, worker sin parent=, _ruta_final_pendiente,
+  closeEvent con wait(), herencia de QDialog.
 """
 
 import logging
@@ -51,6 +53,113 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Helpers de conversión imagen → PDF temporal
+# ─────────────────────────────────────────────────────────────────────────
+
+def _normalizar_modo_pillow(img):
+    """Convierte la imagen al modo correcto para guardar como PDF con Pillow.
+
+    Pillow soporta RGB y L en PDF. Cualquier otro modo se convierte:
+      - RGBA / PA  → composición sobre fondo blanco → RGB
+      - P (paleta) → RGB
+      - L, LA      → L (escala de grises, alpha descartada)
+      - CMYK y resto → RGB
+    """
+    modo = img.mode
+    log.debug("_normalizar_modo_pillow — modo original: %s", modo)
+    if modo == "RGB":
+        return img
+    if modo == "L":
+        return img
+    if modo in ("RGBA", "PA"):
+        from PIL import Image as _Image
+        fondo = _Image.new("RGB", img.size, (255, 255, 255))
+        alpha = img.convert("RGBA").split()[3]
+        fondo.paste(img.convert("RGBA"), mask=alpha)
+        log.debug("_normalizar_modo_pillow — RGBA/PA → RGB con fondo blanco")
+        return fondo
+    if modo in ("LA",):
+        img_l = img.convert("L")
+        log.debug("_normalizar_modo_pillow — LA → L")
+        return img_l
+    # P, CMYK, YCbCr, LAB, HSV, I, F, …
+    img_rgb = img.convert("RGB")
+    log.debug("_normalizar_modo_pillow — %s → RGB", modo)
+    return img_rgb
+
+
+def _imagen_a_pdf_pillow(ruta_imagen: str) -> str:
+    """Convierte una imagen a PDF de una página usando Pillow.
+
+    Devuelve la ruta del archivo temporal. Lanza excepción si falla.
+    """
+    from PIL import Image
+    log.debug("Pillow: abriendo imagen %s", ruta_imagen)
+    img = Image.open(ruta_imagen)
+    log.debug("Pillow: imagen abierta — modo=%s tamaño=%s formato=%s",
+              img.mode, img.size, img.format)
+    img = _normalizar_modo_pillow(img)
+    log.debug("Pillow: modo normalizado → %s", img.mode)
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.close()
+    log.debug("Pillow: guardando PDF en %s", tmp.name)
+    img.save(tmp.name, "PDF", resolution=150)
+    log.debug("Pillow: PDF guardado OK — tamaño=%d bytes",
+              Path(tmp.name).stat().st_size)
+    return tmp.name
+
+
+def _imagen_a_pdf_img2pdf(ruta_imagen: str) -> str:
+    """Intenta convertir una imagen a PDF usando img2pdf (sin recompresión JPEG).
+
+    Devuelve la ruta del archivo temporal. Lanza excepción si falla por
+    cualquier motivo (no solo ImportError).
+    """
+    import img2pdf  # puede lanzar ImportError
+    log.debug("img2pdf: abriendo imagen %s", ruta_imagen)
+    with open(ruta_imagen, "rb") as f_img:
+        log.debug("img2pdf: llamando img2pdf.convert …")
+        datos_pdf = img2pdf.convert(f_img)
+    log.debug("img2pdf: convert OK — %d bytes de PDF generados", len(datos_pdf))
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.write(datos_pdf)
+    tmp.close()
+    log.debug("img2pdf: PDF escrito en %s — tamaño=%d bytes",
+              tmp.name, Path(tmp.name).stat().st_size)
+    return tmp.name
+
+
+def _convertir_imagen_a_pdf(ruta_imagen: str) -> str:
+    """Motor principal de conversión imagen → PDF de una página.
+
+    Estrategia (v7):
+      1. Intentar img2pdf — más fiel (sin recompresión JPEG).
+         Si falla por CUALQUIER razón, se registra como WARNING y se sigue.
+      2. Pillow — robusto, soporta todos los formatos y modos de color.
+
+    Devuelve la ruta del PDF temporal. Lanza excepción si ambos fallan.
+    """
+    # ── Intento 1: img2pdf ───────────────────────────────────────────
+    try:
+        ruta = _imagen_a_pdf_img2pdf(ruta_imagen)
+        log.debug("_convertir_imagen_a_pdf: img2pdf exitoso → %s", ruta)
+        return ruta
+    except ImportError:
+        log.debug("_convertir_imagen_a_pdf: img2pdf no instalado, usando Pillow")
+    except Exception as e_i2p:
+        log.warning(
+            "_convertir_imagen_a_pdf: img2pdf falló (%s: %s) — usando Pillow como fallback",
+            type(e_i2p).__name__, e_i2p,
+        )
+
+    # ── Intento 2: Pillow (motor principal) ─────────────────────────
+    log.debug("_convertir_imagen_a_pdf: ejecutando conversión con Pillow")
+    ruta = _imagen_a_pdf_pillow(ruta_imagen)
+    log.debug("_convertir_imagen_a_pdf: Pillow exitoso → %s", ruta)
+    return ruta
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,32 +197,12 @@ class _WorkerGuardar(QThread):
 
             # ── Etapa 1 / 4: Convertir imagen a PDF de una página ────────
             self.progreso.emit(10, "Convirtiendo imagen a PDF…")
-            log.debug("Etapa 1 — convirtiendo imagen a PDF")
-            try:
-                import img2pdf
-                with open(self._ruta_imagen, "rb") as f_img:
-                    datos_pdf = img2pdf.convert(f_img)
-                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-                tmp.write(datos_pdf)
-                tmp.close()
-                ruta_pag_pdf = tmp.name
-                log.debug("img2pdf OK → %s", ruta_pag_pdf)
-            except ImportError:
-                log.debug("img2pdf no disponible, usando Pillow como fallback")
-                from PIL import Image
-                img = Image.open(self._ruta_imagen)
-                log.debug("Imagen abierta con Pillow — modo=%s tamaño=%s",
-                          img.mode, img.size)
-                if img.mode in ("RGBA", "P"):
-                    img = img.convert("RGB")
-                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-                tmp.close()
-                img.save(tmp.name, "PDF", resolution=150)
-                ruta_pag_pdf = tmp.name
-                log.debug("Pillow PDF OK → %s", ruta_pag_pdf)
+            log.debug("Etapa 1 — iniciando conversión imagen→PDF")
+            ruta_pag_pdf = _convertir_imagen_a_pdf(self._ruta_imagen)
+            log.debug("Etapa 1 — conversión completada → %s", ruta_pag_pdf)
+            self.progreso.emit(30, "Imagen convertida — leyendo documento…")
 
             # ── Etapa 2 / 4: Abrir el PDF original ──────────────────────
-            self.progreso.emit(35, "Leyendo documento original…")
             log.debug("Etapa 2 — leyendo PDF original")
             try:
                 from pypdf import PdfReader, PdfWriter
@@ -133,6 +222,8 @@ class _WorkerGuardar(QThread):
                     f"Índice de página {self._num_pagina} fuera de rango "
                     f"(el PDF tiene {total_pags} página/s)."
                 )
+
+            self.progreso.emit(45, "Leyendo documento original…")
 
             # ── Etapa 3 / 4: Reemplazar la página seleccionada ──────────
             self.progreso.emit(60, "Reemplazando página…")
@@ -217,8 +308,6 @@ class FaseGuardar(QDialog):
         self._ruta_final_pendiente: str | None = None
 
         # Conectar la señal interna con QueuedConnection ANTES de construir UI.
-        # Esto garantiza que _emitir_guardado_listo siempre se ejecute en el
-        # hilo principal, en el siguiente ciclo del event loop.
         self._despachar_guardado_listo.connect(
             self._emitir_guardado_listo,
             Qt.ConnectionType.QueuedConnection,
@@ -452,7 +541,6 @@ class FaseGuardar(QDialog):
         """)
         lay_prog.addWidget(self.barra_progreso)
 
-        # Label de error detallado (visible solo cuando el worker falla)
         self.lbl_error_detalle = QLabel("")
         self.lbl_error_detalle.setStyleSheet(
             "color: #a13544; font-size: 11px;"
@@ -571,7 +659,6 @@ class FaseGuardar(QDialog):
             if resp != QMessageBox.StandardButton.Yes:
                 return
 
-        # Validar que los archivos de entrada existen antes de lanzar el worker
         if not Path(self._ruta_imagen).exists():
             log.error("Imagen de entrada no encontrada: %s", self._ruta_imagen)
             QMessageBox.critical(
@@ -641,7 +728,6 @@ class FaseGuardar(QDialog):
     @pyqtSlot(str)
     def _on_listo(self, ruta_str: str):
         log.debug("Worker emitió listo — ruta=%s", ruta_str)
-        # Solo guardamos la ruta; la emisión real ocurre en _on_finished_thread
         self._ruta_final_pendiente = ruta_str
 
     @pyqtSlot()
@@ -649,13 +735,8 @@ class FaseGuardar(QDialog):
         """
         Slot de QThread.finished — se ejecuta en el hilo PRINCIPAL.
 
-        FIX v6: en lugar de QMetaObject.invokeMethod + Q_ARG (PyQt5 API que
-        falla silenciosamente en PyQt6), usamos la señal interna
-        _despachar_guardado_listo conectada con QueuedConnection.
-        Emitir esa señal aquí la encola en el event loop, garantizando que
-        _emitir_guardado_listo se ejecute en el SIGUIENTE ciclo, cuando el
-        call-stack del slot finished ya terminó y main.py puede destruir
-        este widget de forma segura.
+        FIX v6: señal interna _despachar_guardado_listo con QueuedConnection
+        en lugar de QMetaObject.invokeMethod + Q_ARG (PyQt5 API).
         """
         log.debug("_on_finished_thread — ruta_pendiente=%s",
                   self._ruta_final_pendiente)
@@ -665,12 +746,10 @@ class FaseGuardar(QDialog):
         ruta = self._ruta_final_pendiente
         self._ruta_final_pendiente = None
 
-        # Liberar worker ANTES de encolar la emisión
         self._limpiar_worker()
 
         if ruta is not None:
             log.debug("Encolando _despachar_guardado_listo con ruta=%s", ruta)
-            # Esta emisión queda encolada gracias a QueuedConnection
             self._despachar_guardado_listo.emit(ruta)
         else:
             log.debug("ruta_pendiente es None — el worker terminó con error")
@@ -680,8 +759,6 @@ class FaseGuardar(QDialog):
         """
         Slot invocado en el siguiente ciclo del event loop vía
         _despachar_guardado_listo (QueuedConnection).
-        En este punto el call-stack del slot de `finished` ya terminó;
-        es seguro emitir guardado_listo y dejar que main.py destruya este widget.
         """
         log.debug("_emitir_guardado_listo — emitiendo guardado_listo con %s", ruta)
         try:
@@ -693,13 +770,11 @@ class FaseGuardar(QDialog):
     def _on_error(self, mensaje: str):
         """
         Slot del worker.error — se ejecuta en el hilo principal.
-        No limpiamos el worker aquí; lo hace _on_finished_thread
-        cuando finished se dispare justo después.
+        No limpiamos el worker aquí; lo hace _on_finished_thread.
         """
         log.error("Worker reportó error:\n%s", mensaje)
         self._set_guardando(False)
 
-        # Mostramos el error resumido en el panel de progreso
         resumen = mensaje.split("\n")[0]
         self.lbl_progreso_etapa.setText("❌  Error al guardar")
         self.lbl_progreso_etapa.setStyleSheet(
