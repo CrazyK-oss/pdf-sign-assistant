@@ -5,12 +5,25 @@ Fase 4 del flujo principal: confirmación y guardado del PDF modificado.
 
 Recibe:
   - ruta_pdf    : Path del PDF de trabajo (en pdfs_trabajo/)
-  - ruta_imagen : str  ruta de la imagen escaneada (PNG/BMP/JPG)
+  - ruta_imagen : str  ruta de la imagen resultante (PNG/BMP/JPG)
+                       sin importar si vino del escáner manual o de
+                       drag-and-drop; el tratamiento es idéntico.
   - num_pagina  : int  índice 0-based de la página a reemplazar
 
 Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
+
+Cambios respecto a la versión anterior
+---------------------------------------
+* Barra de progreso real con 4 etapas reportadas por el worker.
+* Worker emite señal `progreso(int, str)` para feedback granular.
+* El nombre de destino se pre-rellena con el stem del PDF original
+  (sin prefijo reedit_) y el usuario puede cambiarlo antes de guardar.
+* Se eliminó la dependencia de QMessageBox para el estado "Guardando";
+  ahora la barra de progreso + etiqueta dan feedback visual suficiente.
+* Unificación total: no importa el origen de ruta_imagen, el flujo
+  de conversión → reemplazo de página → escritura es el mismo.
 """
 
 import os
@@ -22,15 +35,18 @@ from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QLineEdit, QMessageBox, QSizePolicy, QSpacerItem,
+    QProgressBar,
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Worker: convierte imagen → página PDF y reemplaza en hilo secundario
+#  Emite progreso en 4 etapas (0-25-60-90-100 %)
 # ─────────────────────────────────────────────────────────────────────────
 class _WorkerGuardar(QThread):
-    listo = pyqtSignal(str)   # ruta del PDF final
-    error = pyqtSignal(str)
+    progreso = pyqtSignal(int, str)   # (porcentaje 0-100, etiqueta)
+    listo    = pyqtSignal(str)        # ruta del PDF final
+    error    = pyqtSignal(str)
 
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
                  num_pagina: int, destino: Path, parent=None):
@@ -41,32 +57,31 @@ class _WorkerGuardar(QThread):
         self._destino     = destino
 
     def run(self):
+        ruta_pag_pdf: str | None = None
         try:
-            # ── 1. Convertir imagen a PDF de una sola página ──────────
+            # ── Etapa 1 / 4: Convertir imagen a PDF de una sola página ──
+            self.progreso.emit(10, "Convirtiendo imagen a PDF…")
             try:
                 import img2pdf
                 with open(self._ruta_imagen, "rb") as f_img:
                     datos_pdf = img2pdf.convert(f_img)
-                tmp_pag = tempfile.NamedTemporaryFile(
-                    suffix=".pdf", delete=False
-                )
-                tmp_pag.write(datos_pdf)
-                tmp_pag.close()
-                ruta_pag_pdf = tmp_pag.name
+                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                tmp.write(datos_pdf)
+                tmp.close()
+                ruta_pag_pdf = tmp.name
             except ImportError:
-                # Fallback: usar pypdf + Pillow si img2pdf no está
+                # Fallback: Pillow si img2pdf no está instalado
                 from PIL import Image
                 img = Image.open(self._ruta_imagen)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
-                tmp_pag = tempfile.NamedTemporaryFile(
-                    suffix=".pdf", delete=False
-                )
-                tmp_pag.close()
-                img.save(tmp_pag.name, "PDF", resolution=150)
-                ruta_pag_pdf = tmp_pag.name
+                tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                tmp.close()
+                img.save(tmp.name, "PDF", resolution=150)
+                ruta_pag_pdf = tmp.name
 
-            # ── 2. Reemplazar la página en el PDF original ────────────
+            # ── Etapa 2 / 4: Abrir el PDF original ──────────────────────
+            self.progreso.emit(35, "Leyendo documento original…")
             try:
                 from pypdf import PdfReader, PdfWriter
             except ImportError:
@@ -74,29 +89,40 @@ class _WorkerGuardar(QThread):
 
             lector_orig  = PdfReader(str(self._ruta_pdf))
             lector_nueva = PdfReader(ruta_pag_pdf)
-            writer = PdfWriter()
 
+            # ── Etapa 3 / 4: Reemplazar la página seleccionada ──────────
+            self.progreso.emit(60, "Reemplazando página…")
+            writer = PdfWriter()
             for i, pag in enumerate(lector_orig.pages):
                 if i == self._num_pagina:
-                    # Escalar la nueva página al tamaño original
                     pag_nueva = lector_nueva.pages[0]
+                    # Respetar el tamaño de la página original
                     pag_nueva.mediabox = pag.mediabox
                     writer.add_page(pag_nueva)
                 else:
                     writer.add_page(pag)
 
+            # ── Etapa 4 / 4: Escribir el PDF resultante ─────────────────
+            self.progreso.emit(85, "Escribiendo archivo final…")
             with open(self._destino, "wb") as f_out:
                 writer.write(f_out)
 
-            # ── 3. Limpiar temporal ───────────────────────────────────
+            # Limpieza del temporal
             try:
                 os.remove(ruta_pag_pdf)
             except Exception:
                 pass
 
+            self.progreso.emit(100, "¡Listo!")
             self.listo.emit(str(self._destino))
 
         except Exception as e:
+            # Limpiar temporal si algo falló a mitad
+            if ruta_pag_pdf:
+                try:
+                    os.remove(ruta_pag_pdf)
+                except Exception:
+                    pass
             self.error.emit(str(e))
 
 
@@ -106,6 +132,9 @@ class _WorkerGuardar(QThread):
 class FaseGuardar(QWidget):
     """
     Pantalla de confirmación y guardado del documento modificado.
+
+    Acepta ruta_imagen de cualquier origen (escáner manual o drag-and-drop).
+    Muestra barra de progreso real durante la conversión y guardado.
 
     Señales:
       guardado_listo(Path)  → PDF guardado correctamente
@@ -117,9 +146,9 @@ class FaseGuardar(QWidget):
     def __init__(self, ruta_pdf: Path, ruta_imagen: str,
                  num_pagina: int, carpeta_firmados: Path, parent=None):
         super().__init__(parent)
-        self._ruta_pdf        = ruta_pdf
-        self._ruta_imagen     = ruta_imagen
-        self._num_pagina      = num_pagina
+        self._ruta_pdf         = ruta_pdf
+        self._ruta_imagen      = ruta_imagen
+        self._num_pagina       = num_pagina
         self._carpeta_firmados = carpeta_firmados
         self._worker: _WorkerGuardar | None = None
         self._construir_ui()
@@ -157,9 +186,9 @@ class FaseGuardar(QWidget):
                         QSizePolicy.Policy.Minimum)
         )
 
-        btn_volver = QPushButton("← Volver al escaneo")
-        btn_volver.setFixedHeight(36)
-        btn_volver.setStyleSheet("""
+        self.btn_volver = QPushButton("← Volver al escaneo")
+        self.btn_volver.setFixedHeight(36)
+        self.btn_volver.setStyleSheet("""
             QPushButton {
                 background: transparent;
                 color: #7a7974;
@@ -169,9 +198,10 @@ class FaseGuardar(QWidget):
                 font-size: 13px;
             }
             QPushButton:hover { color: #28251d; border-color: rgba(40,37,29,0.45); }
+            QPushButton:disabled { color: #bab9b4; border-color: rgba(40,37,29,0.10); }
         """)
-        btn_volver.clicked.connect(self.cancelado)
-        lay_cab.addWidget(btn_volver)
+        self.btn_volver.clicked.connect(self.cancelado)
+        lay_cab.addWidget(self.btn_volver)
         raiz.addWidget(cab)
 
         # Cuerpo
@@ -204,7 +234,7 @@ class FaseGuardar(QWidget):
         info_col = QVBoxLayout()
         info_col.setSpacing(4)
 
-        lbl_tag = QLabel("IMAGEN ESCANEADA")
+        lbl_tag = QLabel("IMAGEN A INSERTAR")
         lbl_tag.setStyleSheet(
             "font-size: 11px; font-weight: 700; color: #7a7974;"
             "letter-spacing: 1px;"
@@ -222,6 +252,14 @@ class FaseGuardar(QWidget):
         lbl_ruta_img.setStyleSheet("color: #7a7974; font-size: 11px;")
         lbl_ruta_img.setWordWrap(True)
         info_col.addWidget(lbl_ruta_img)
+
+        lbl_info_reemplazo = QLabel(
+            f"Esta imagen reemplazará la página {self._num_pagina + 1} del documento."
+        )
+        lbl_info_reemplazo.setStyleSheet(
+            "color: #01696f; font-size: 12px; font-weight: 600;"
+        )
+        info_col.addWidget(lbl_info_reemplazo)
 
         info_col.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
@@ -274,10 +312,13 @@ class FaseGuardar(QWidget):
             QLineEdit:focus {
                 border: 1.5px solid #01696f;
             }
+            QLineEdit:disabled {
+                background: #f3f0ec;
+                color: #bab9b4;
+            }
         """)
-        # Sugerir nombre basado en el PDF original
+        # Nombre por defecto = stem del PDF original (sin prefijo reedit_)
         stem = Path(str(self._ruta_pdf)).stem
-        # Quitar prefijos de re-edición si los hay
         if stem.startswith("reedit_"):
             stem = stem[len("reedit_"):]
         self.input_nombre.setText(stem)
@@ -297,6 +338,50 @@ class FaseGuardar(QWidget):
         lay_nombre.addWidget(self.lbl_error_nombre)
 
         lay_cuerpo.addWidget(panel_nombre)
+
+        # ── Barra de progreso (oculta hasta que inicia el guardado) ───
+        self.panel_progreso = QFrame()
+        self.panel_progreso.setStyleSheet("""
+            QFrame {
+                background: #f9f8f5;
+                border: 1px solid rgba(1,105,111,0.20);
+                border-radius: 10px;
+            }
+        """)
+        lay_prog = QVBoxLayout(self.panel_progreso)
+        lay_prog.setContentsMargins(20, 16, 20, 16)
+        lay_prog.setSpacing(8)
+
+        self.lbl_progreso_etapa = QLabel("Iniciando…")
+        self.lbl_progreso_etapa.setStyleSheet(
+            "color: #01696f; font-size: 13px; font-weight: 600;"
+        )
+        lay_prog.addWidget(self.lbl_progreso_etapa)
+
+        self.barra_progreso = QProgressBar()
+        self.barra_progreso.setRange(0, 100)
+        self.barra_progreso.setValue(0)
+        self.barra_progreso.setFixedHeight(10)
+        self.barra_progreso.setTextVisible(False)
+        self.barra_progreso.setStyleSheet("""
+            QProgressBar {
+                background: #e6e4df;
+                border: none;
+                border-radius: 5px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #01696f, stop:1 #437a22
+                );
+                border-radius: 5px;
+            }
+        """)
+        lay_prog.addWidget(self.barra_progreso)
+
+        self.panel_progreso.hide()
+        lay_cuerpo.addWidget(self.panel_progreso)
+
         lay_cuerpo.addStretch()
 
         raiz.addWidget(cuerpo, 1)
@@ -346,8 +431,8 @@ class FaseGuardar(QWidget):
                 font-size: 13px;
                 font-weight: 600;
             }
-            QPushButton:hover   { background: #2e5c10; }
-            QPushButton:pressed { background: #1e3f0a; }
+            QPushButton:hover    { background: #2e5c10; }
+            QPushButton:pressed  { background: #1e3f0a; }
             QPushButton:disabled { background: #dcd9d5; color: #bab9b4; }
         """)
         self.btn_guardar.clicked.connect(self._on_guardar)
@@ -364,7 +449,6 @@ class FaseGuardar(QWidget):
             self.input_nombre.setFocus()
             return
 
-        # Limpiar caracteres inválidos en nombres de archivo
         caracteres_invalidos = set('/\\:*?"<>|')
         if any(c in nombre for c in caracteres_invalidos):
             self.lbl_error_nombre.setText(
@@ -380,7 +464,6 @@ class FaseGuardar(QWidget):
 
         destino = self._carpeta_firmados / nombre
 
-        # Avisar si ya existe y confirmar sobreescritura
         if destino.exists():
             resp = QMessageBox.question(
                 self,
@@ -401,23 +484,35 @@ class FaseGuardar(QWidget):
             destino,
             parent=self,
         )
+        self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
     def _set_guardando(self, guardando: bool):
         self.btn_guardar.setEnabled(not guardando)
+        self.btn_volver.setEnabled(not guardando)
         self.input_nombre.setEnabled(not guardando)
+
         if guardando:
             self.btn_guardar.setText("Guardando…")
-            self.lbl_estado.setText("Procesando PDF, un momento…")
+            self.lbl_estado.setText("Procesando, no cierres la ventana…")
             self.lbl_estado.setStyleSheet(
                 "color: #01696f; font-size: 13px; font-weight: 600;"
             )
+            # Mostrar barra de progreso
+            self.barra_progreso.setValue(0)
+            self.lbl_progreso_etapa.setText("Iniciando…")
+            self.panel_progreso.show()
         else:
             self.btn_guardar.setText("Guardar documento  ✓")
             self.lbl_estado.setText("Revisá el nombre y confirmá para guardar.")
             self.lbl_estado.setStyleSheet("color: #7a7974; font-size: 13px;")
+            self.panel_progreso.hide()
+
+    def _on_progreso(self, porcentaje: int, etiqueta: str):
+        self.barra_progreso.setValue(porcentaje)
+        self.lbl_progreso_etapa.setText(etiqueta)
 
     def _on_listo(self, ruta_str: str):
         self._set_guardando(False)
@@ -429,5 +524,5 @@ class FaseGuardar(QWidget):
             self,
             "Error al guardar",
             f"No se pudo guardar el documento:\n\n{mensaje}\n\n"
-            "Verificá que pypdf (o PyPDF2) y Pillow estén instalados."
+            "Verificá que pypdf (o PyPDF2) y Pillow estén instalados.",
         )
