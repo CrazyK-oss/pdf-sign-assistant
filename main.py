@@ -1,12 +1,13 @@
 """
-PDF Sign Assistant — main.py  (Parte 1 — refactor completo)
+PDF Sign Assistant — main.py
 ============================================================
 Flujo principal:
   1. Pantalla de inicio: botón "Abrir PDF" + lista de trabajos ya guardados.
      — NO hay lista de PDFs al inicio, solo el botón para abrir uno.
   2. Cuando hay un PDF en trabajo: panel activo siempre visible con botón
      Cancelar prominente. El botón "Abrir PDF" se deshabilita.
-  3. El panel activo delega a fase1_preview → fase2_print → fase3_scan → fase_guardar.
+  3. El panel activo delega a:
+       fase1_preview → fase2_print → fase3_scan → fase_guardar
   4. Al confirmar se añade a la lista de guardados (con fecha/hora).
   5. Doble‑clic en guardado → vuelve a abrir ese PDF para re‑editar.
   6. Seleccionar guardado → habilita botones Editar y Enviar correo.
@@ -38,7 +39,7 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
         QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
-        QInputDialog, QSpacerItem,
+        QSpacerItem,
     )
     from PyQt6.QtCore import Qt, QSize
     from PyQt6.QtGui import QFont, QColor
@@ -48,7 +49,7 @@ except ImportError:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
         QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
-        QInputDialog, QSpacerItem,
+        QSpacerItem,
     )
     from PyQt6.QtCore import Qt, QSize
     from PyQt6.QtGui import QFont, QColor
@@ -84,8 +85,6 @@ C_SUCCESS_H    = "#2e5c10"
 C_SUCCESS_BG   = "#d4dfcc"
 C_ACTIVE_BG    = "#e4f0ee"
 C_ACTIVE_BD    = "#01696f"
-C_WARNING_BG   = "#fef9ec"
-C_WARNING_BD   = "#d19900"
 
 
 STYLESHEET = f"""
@@ -254,7 +253,6 @@ class PanelActivo(QFrame):
     """
     Panel siempre visible cuando hay un PDF en proceso.
     Muestra: nombre del archivo · ruta · botón 'Trabajar páginas' · botón 'Cancelar'.
-    El botón Cancelar es prominente y siempre accesible.
     """
 
     def __init__(self, ruta: Path, on_trabajar, on_cancelar, parent=None):
@@ -266,7 +264,6 @@ class PanelActivo(QFrame):
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(10)
 
-        # ── Fila: tag + nombre + ruta ────────────────────────────────────
         fila_info = QHBoxLayout()
         fila_info.setSpacing(12)
 
@@ -299,7 +296,6 @@ class PanelActivo(QFrame):
 
         lay.addWidget(_sep())
 
-        # ── Fila: botones ────────────────────────────────────────────────
         fila_btns = QHBoxLayout()
         fila_btns.setSpacing(8)
 
@@ -325,7 +321,6 @@ class ItemGuardado(QListWidgetItem):
         super().__init__()
         self.ruta = ruta
 
-        # Fecha de modificación del archivo
         try:
             ts = ruta.stat().st_mtime
             fecha = datetime.fromtimestamp(ts).strftime("%d/%m/%Y  %H:%M")
@@ -347,8 +342,9 @@ class VentanaPrincipal(QMainWindow):
         self.config = _cargar_config()
         self._pdf_activo: Path | None = None
         self._pagina_activa: int = 0
-        self._vista_preview  = None
-        self._vista_escaneo  = None
+        self._vista_preview   = None
+        self._vista_escaneo   = None
+        self._vista_guardar   = None
         self._build_ui()
         self._cargar_guardados_existentes()
 
@@ -363,7 +359,7 @@ class VentanaPrincipal(QMainWindow):
         root.setContentsMargins(24, 20, 24, 16)
         root.setSpacing(0)
 
-        # ── Header ────────────────────────────────────────────────────────
+        # Header
         header = QHBoxLayout()
         header.setSpacing(12)
 
@@ -381,7 +377,7 @@ class VentanaPrincipal(QMainWindow):
         root.addWidget(_sep())
         root.addSpacing(14)
 
-        # ── Panel activo (oculto al inicio) ───────────────────────────────
+        # Panel activo (oculto al inicio)
         self.panel_activo_container = QWidget()
         self.panel_activo_container.setVisible(False)
         self._lay_panel = QVBoxLayout(self.panel_activo_container)
@@ -393,7 +389,7 @@ class VentanaPrincipal(QMainWindow):
         self._sep_panel.setVisible(False)
         root.addWidget(self._sep_panel)
 
-        # ── Sección: trabajos guardados ───────────────────────────────────
+        # Sección: trabajos guardados
         root.addSpacing(14)
 
         hdr_guardados = QHBoxLayout()
@@ -407,7 +403,7 @@ class VentanaPrincipal(QMainWindow):
         root.addLayout(hdr_guardados)
         root.addSpacing(8)
 
-        # ── Lista de guardados ────────────────────────────────────────────
+        # Lista de guardados
         self.lista_guardados = QListWidget()
         self.lista_guardados.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
@@ -420,7 +416,7 @@ class VentanaPrincipal(QMainWindow):
         )
         root.addWidget(self.lista_guardados)
 
-        # ── Panel vacío (sin guardados) ───────────────────────────────────
+        # Panel vacío
         self.panel_vacio = QFrame()
         self.panel_vacio.setObjectName("panelVacio")
         lay_vacio = QVBoxLayout(self.panel_vacio)
@@ -450,7 +446,7 @@ class VentanaPrincipal(QMainWindow):
 
         root.addWidget(self.panel_vacio)
 
-        # ── Barra de acciones sobre guardados ─────────────────────────────
+        # Barra de acciones sobre guardados
         root.addSpacing(10)
         fila_acciones = QHBoxLayout()
         fila_acciones.setSpacing(8)
@@ -470,7 +466,7 @@ class VentanaPrincipal(QMainWindow):
         fila_acciones.addStretch()
         root.addLayout(fila_acciones)
 
-        # ── Status bar ────────────────────────────────────────────────────
+        # Status bar
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Listo — abrí un PDF para comenzar.")
@@ -498,7 +494,7 @@ class VentanaPrincipal(QMainWindow):
 
     def _agregar_item_guardado(self, ruta: Path, scroll=True):
         item = ItemGuardado(ruta)
-        self.lista_guardados.insertItem(0, item)   # más reciente arriba
+        self.lista_guardados.insertItem(0, item)
         if scroll:
             self.lista_guardados.scrollToItem(item)
         self._actualizar_estado_vacio()
@@ -535,7 +531,6 @@ class VentanaPrincipal(QMainWindow):
 
         origen  = Path(ruta_str)
         destino = CARPETA_TRABAJO / origen.name
-        # Evitar colisión de nombres
         if destino.exists():
             stem = origen.stem
             ts   = datetime.now().strftime("%H%M%S")
@@ -554,7 +549,6 @@ class VentanaPrincipal(QMainWindow):
         """Muestra el panel activo con el PDF cargado."""
         self._pdf_activo = ruta
 
-        # Limpiar panel anterior si existía
         while self._lay_panel.count():
             w = self._lay_panel.takeAt(0).widget()
             if w:
@@ -590,12 +584,14 @@ class VentanaPrincipal(QMainWindow):
         except Exception:
             pass
 
+        self._cerrar_vistas_abiertas()
         self._desactivar_panel()
         self.status.showMessage("Trabajo cancelado.")
 
     def _desactivar_panel(self):
         """Oculta el panel activo y libera el estado del PDF."""
         self._pdf_activo = None
+        self._pagina_activa = 0
         while self._lay_panel.count():
             w = self._lay_panel.takeAt(0).widget()
             if w:
@@ -604,13 +600,28 @@ class VentanaPrincipal(QMainWindow):
         self._sep_panel.setVisible(False)
         self.btn_abrir.setEnabled(True)
 
+    def _cerrar_vistas_abiertas(self):
+        """Cierra y destruye cualquier ventana de fase que esté abierta."""
+        for attr in ("_vista_preview", "_vista_escaneo", "_vista_guardar"):
+            vista = getattr(self, attr, None)
+            if vista is not None:
+                vista.close()
+                vista.deleteLater()
+                setattr(self, attr, None)
+
     # ── Flujo de trabajo principal ────────────────────────────────────────
+    #
+    #   fase1_preview  →  _on_pagina_elegida
+    #   fase2_print    →  _abrir_escaneo
+    #   fase3_scan     →  _on_imagen_escaneada
+    #   fase_guardar   →  _on_guardado_listo
+    #
 
     def _iniciar_flujo_trabajo(self):
+        """Fase 1 — abre el grid de páginas."""
         if self._pdf_activo is None:
             return
 
-        # Cerrar vista anterior si quedó abierta
         if self._vista_preview is not None:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
@@ -619,22 +630,14 @@ class VentanaPrincipal(QMainWindow):
         self._vista_preview = VistaPrevisualizacion(str(self._pdf_activo))
         self._vista_preview.setWindowTitle("PDF Sign Assistant — Seleccionar página")
         self._vista_preview.resize(960, 680)
-        # pagina_seleccionada(int) se emite en fase1_preview cuando el usuario
-        # elige una página Y confirma imprimir (ImpresionPagina.imprimir devuelve True).
         self._vista_preview.pagina_seleccionada.connect(self._on_pagina_elegida)
         self._vista_preview.cancelar.connect(self._on_preview_cancelado)
         self._vista_preview.show()
 
     def _on_pagina_elegida(self, num_pagina: int):
-        """
-        Fase 2 → impresión directa.
-        ImpresionPagina.imprimir() abre el diálogo nativo del OS y devuelve
-        True si el usuario confirmó, False si canceló.
-        Si imprimió, cerramos el grid y abrimos la vista de escaneo.
-        """
+        """Fase 2 — impresión directa."""
         self._pagina_activa = num_pagina
 
-        # Cerrar el grid de páginas antes de lanzar el diálogo de impresión
         if self._vista_preview is not None:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
@@ -646,24 +649,17 @@ class VentanaPrincipal(QMainWindow):
         )
 
         if not imprimio:
-            # Usuario canceló el diálogo de impresión → volvemos al grid
             self.status.showMessage("Impresión cancelada — podés elegir otra página.")
             self._iniciar_flujo_trabajo()
             return
 
-        # Impresión enviada → pasar a Fase 3 (escaneo)
         self.status.showMessage(
             f"Página {num_pagina + 1} enviada a la impresora. Esperando escaneo…"
         )
         self._abrir_escaneo(num_pagina)
 
     def _abrir_escaneo(self, num_pagina: int):
-        """
-        Fase 3 → VistaEscaneo.
-        Firma correcta: VistaEscaneo(ruta_pdf: str, num_pagina: int)
-        Señal de salida correcta: imagen_lista(str)  → ruta de la imagen escaneada.
-        """
-        # Cerrar instancia anterior si quedó abierta
+        """Fase 3 — vista de escaneo/carga de imagen."""
         if self._vista_escaneo is not None:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
@@ -680,29 +676,75 @@ class VentanaPrincipal(QMainWindow):
         self._vista_escaneo.show()
 
     def _on_imagen_escaneada(self, ruta_imagen: str):
-        """
-        Recibe la ruta de la imagen (PNG/JPG) escaneada.
-        Fase 4 (fase_guardar.py) tomará esta imagen y la página activa
-        para reemplazar la página en el PDF y guardar el resultado.
-        TODO: conectar con fase_guardar en la Parte 4.
-        """
+        """Fase 4 — abre FaseGuardar con la imagen recibida."""
         if self._vista_escaneo is not None:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
             self._vista_escaneo = None
 
         self.status.showMessage(
-            f"Imagen lista — página {self._pagina_activa + 1} · "
-            f"{Path(ruta_imagen).name}  →  pendiente guardar (Parte 4)"
+            f"Imagen lista — abriendo confirmación de guardado…"
         )
-        # Placeholder hasta Parte 4:
-        print(f"[DEBUG] ruta_imagen={ruta_imagen}  pagina_idx={self._pagina_activa}")
+        self._abrir_guardar(ruta_imagen)
+
+    def _abrir_guardar(self, ruta_imagen: str):
+        """Fase 4 — vista de confirmación y guardado del PDF."""
+        if self._vista_guardar is not None:
+            self._vista_guardar.close()
+            self._vista_guardar.deleteLater()
+            self._vista_guardar = None
+
+        from modules.fase_guardar import FaseGuardar
+        self._vista_guardar = FaseGuardar(
+            ruta_pdf        = self._pdf_activo,
+            ruta_imagen     = ruta_imagen,
+            num_pagina      = self._pagina_activa,
+            carpeta_firmados= CARPETA_FIRMADO,
+            parent          = self,
+        )
+        self._vista_guardar.setWindowTitle("PDF Sign Assistant — Guardar documento")
+        self._vista_guardar.resize(780, 520)
+        self._vista_guardar.guardado_listo.connect(self._on_guardado_listo)
+        self._vista_guardar.cancelado.connect(self._on_guardar_cancelado)
+        self._vista_guardar.show()
+
+    def _on_guardado_listo(self, ruta_final):
+        """El PDF fue guardado correctamente."""
+        if self._vista_guardar is not None:
+            self._vista_guardar.close()
+            self._vista_guardar.deleteLater()
+            self._vista_guardar = None
+
+        # Limpiar el PDF de trabajo
+        try:
+            if self._pdf_activo and self._pdf_activo.exists():
+                self._pdf_activo.unlink()
+        except Exception:
+            pass
+
+        nombre = Path(ruta_final).name
+        self._desactivar_panel()
+        self._agregar_item_guardado(Path(ruta_final))
+        self.status.showMessage(f"✅  Guardado: {nombre}")
+
+        QMessageBox.information(
+            self,
+            "¡Listo!",
+            f"Documento guardado exitosamente:\n{ruta_final}"
+        )
+
+    def _on_guardar_cancelado(self):
+        """Usuario presionó '← Volver al escaneo' en FaseGuardar."""
+        if self._vista_guardar is not None:
+            self._vista_guardar.close()
+            self._vista_guardar.deleteLater()
+            self._vista_guardar = None
+
+        self.status.showMessage("Volviendo al escaneo…")
+        self._abrir_escaneo(self._pagina_activa)
 
     def _on_escaneo_cancelado(self):
-        """
-        Usuario presionó '← Volver a páginas' en VistaEscaneo.
-        Reabrimos el grid para que pueda elegir otra página.
-        """
+        """Usuario presionó '← Volver a páginas' en VistaEscaneo."""
         if self._vista_escaneo is not None:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
@@ -716,66 +758,6 @@ class VentanaPrincipal(QMainWindow):
             self._vista_preview.deleteLater()
             self._vista_preview = None
         self.status.showMessage("Vista de páginas cerrada.")
-
-    # ── Finalizar y guardar ───────────────────────────────────────────────
-
-    def _finalizar_trabajo(self, imagen_pdf: Path, pagina_idx: int):
-        """
-        Reemplaza la página seleccionada, pregunta nombre y guarda en firmados.
-        Este método será reemplazado/expandido en la Parte 4 (fase_guardar.py).
-        """
-        if self._pdf_activo is None:
-            return
-
-        nombre_sugerido = self._pdf_activo.stem
-        nombre, ok = QInputDialog.getText(
-            self, "Guardar documento",
-            "¿Con qué nombre querés guardar el PDF modificado?",
-            text=nombre_sugerido,
-        )
-        if not ok or not nombre.strip():
-            return
-
-        nombre = nombre.strip()
-        if not nombre.lower().endswith(".pdf"):
-            nombre += ".pdf"
-
-        destino_final = CARPETA_FIRMADO / nombre
-
-        try:
-            self._reemplazar_pagina(
-                self._pdf_activo, imagen_pdf, pagina_idx, destino_final
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "Error al guardar", str(e))
-            return
-
-        self._desactivar_panel()
-        self._agregar_item_guardado(destino_final)
-        self.status.showMessage(f"✅  Guardado: {nombre}")
-
-        QMessageBox.information(
-            self, "¡Listo!",
-            f"Documento guardado exitosamente:\n{destino_final}"
-        )
-
-    def _reemplazar_pagina(self, pdf_original: Path, nueva_pag_pdf: Path,
-                           idx: int, destino: Path):
-        """Reemplaza la página `idx` en pdf_original con nueva_pag_pdf."""
-        try:
-            from pypdf import PdfReader, PdfWriter
-        except ImportError:
-            from PyPDF2 import PdfReader, PdfWriter  # fallback
-
-        lector_orig  = PdfReader(str(pdf_original))
-        lector_nueva = PdfReader(str(nueva_pag_pdf))
-        writer       = PdfWriter()
-
-        for i, pag in enumerate(lector_orig.pages):
-            writer.add_page(lector_nueva.pages[0] if i == idx else pag)
-
-        with open(destino, "wb") as f:
-            writer.write(f)
 
     # ── Re‑abrir guardado ─────────────────────────────────────────────────
 
@@ -834,10 +816,10 @@ class VentanaPrincipal(QMainWindow):
             return
 
         enviar_documento(
-            pdf_firmado=item.ruta,
-            config=self.config,
-            paginas=[0],
-            nombre_doc=item.ruta.stem,
+            pdf_firmado = item.ruta,
+            config      = self.config,
+            paginas     = [0],
+            nombre_doc  = item.ruta.stem,
         )
         self.status.showMessage(
             f"Flujo de envío iniciado para: {item.ruta.name}"

@@ -1,318 +1,433 @@
+"""
+modules/fase_guardar.py
+=======================
+Fase 4 del flujo principal: confirmación y guardado del PDF modificado.
+
+Recibe:
+  - ruta_pdf    : Path del PDF de trabajo (en pdfs_trabajo/)
+  - ruta_imagen : str  ruta de la imagen escaneada (PNG/BMP/JPG)
+  - num_pagina  : int  índice 0-based de la página a reemplazar
+
+Emite:
+  - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
+  - cancelado()           → el usuario descartó la operación
+"""
+
 import os
-import sys
-import glob          # ✅ FIX: para limpiar archivos temporales anteriores
-import uuid          # ✅ FIX: para generar nombres únicos
 import tempfile
-import comtypes
-import comtypes.client
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
-from PyQt6.QtGui import QPixmap, QDragEnterEvent, QDropEvent
+from pathlib import Path
+
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QMessageBox, QFrame, QApplication
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFrame, QLineEdit, QMessageBox, QSizePolicy, QSpacerItem,
 )
 
 
-# ─────────────────────────────────────────────
-#  Worker WIA (hilo secundario)
-# ─────────────────────────────────────────────
-class WIAScanWorker(QThread):
-    scan_completado  = pyqtSignal(str)   # ruta del archivo escaneado
-    scan_cancelado   = pyqtSignal()
-    scan_error       = pyqtSignal(str)
+# ─────────────────────────────────────────────────────────────────────────
+#  Worker: convierte imagen → página PDF y reemplaza en hilo secundario
+# ─────────────────────────────────────────────────────────────────────────
+class _WorkerGuardar(QThread):
+    listo = pyqtSignal(str)   # ruta del PDF final
+    error = pyqtSignal(str)
 
-    def __init__(self, ruta_salida: str, parent=None):
+    def __init__(self, ruta_pdf: Path, ruta_imagen: str,
+                 num_pagina: int, destino: Path, parent=None):
         super().__init__(parent)
-        self._ruta_salida = ruta_salida
+        self._ruta_pdf    = ruta_pdf
+        self._ruta_imagen = ruta_imagen
+        self._num_pagina  = num_pagina
+        self._destino     = destino
 
     def run(self):
         try:
-            wia = comtypes.client.CreateObject("WIA.CommonDialog")
-            device = wia.ShowSelectDevice(0, True)
-            if device is None:
-                self.scan_cancelado.emit()
-                return
-
-            imagen = wia.ShowAcquireImage(
-                0,       # WiaDeviceType: unspecified
-                0,       # WiaImageIntent
-                0,       # WiaImageBias
-                "{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}",  # BMP
-                True,
-                True,
-                False
-            )
-            if imagen is None:
-                self.scan_cancelado.emit()
-                return
-
-            imagen.SaveFile(self._ruta_salida)
-            self.scan_completado.emit(self._ruta_salida)
-
-        except Exception as e:
-            codigo = getattr(e, 'hresult', 0)
-            # 0x80210003 = usuario canceló en el diálogo WIA
-            if codigo == -2147024893 or codigo == 0x80210003:
-                self.scan_cancelado.emit()
-            else:
-                self.scan_error.emit(str(e))
-
-
-# ─────────────────────────────────────────────
-#  Zona de drag & drop
-# ─────────────────────────────────────────────
-class ZonaDrop(QFrame):
-    archivo_soltado = pyqtSignal(str)
-
-    EXTENSIONES_VALIDAS = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setObjectName("ZonaDrop")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        self._lbl_icono = QLabel("📂", self)
-        self._lbl_icono.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self._lbl_texto = QLabel("Arrastra una imagen aquí\no haz clic en Examinar", self)
-        self._lbl_texto.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._lbl_texto.setWordWrap(True)
-
-        lay = QVBoxLayout(self)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._lbl_icono)
-        lay.addWidget(self._lbl_texto)
-
-    # ── drag & drop ──────────────────────────
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if urls and self._es_valida(urls[0].toLocalFile()):
-                event.acceptProposedAction()
-                self.setProperty("drag_over", True)
-                self.style().unpolish(self)
-                self.style().polish(self)
-                return
-        event.ignore()
-
-    def dragLeaveEvent(self, event):
-        self.setProperty("drag_over", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def dropEvent(self, event: QDropEvent):
-        self.setProperty("drag_over", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        ruta = event.mimeData().urls()[0].toLocalFile()
-        if self._es_valida(ruta):
-            self.archivo_soltado.emit(ruta)
-
-    def _es_valida(self, ruta: str) -> bool:
-        ext = os.path.splitext(ruta)[1].lower()
-        return ext in self.EXTENSIONES_VALIDAS
-
-
-# ─────────────────────────────────────────────
-#  Pantalla principal de escaneo
-# ─────────────────────────────────────────────
-class FaseEscaneo(QWidget):
-    escaneo_listo = pyqtSignal(str)   # emite ruta de imagen al terminar
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Digitalizar página")
-        self.resize(560, 480)
-
-        self._ruta_img: str | None = None
-        self._worker: WIAScanWorker | None = None
-
-        self._construir_ui()
-
-    # ── UI ───────────────────────────────────
-    def _construir_ui(self):
-        lay_principal = QVBoxLayout(self)
-        lay_principal.setContentsMargins(20, 20, 20, 20)
-        lay_principal.setSpacing(14)
-
-        # Título
-        lbl_titulo = QLabel("Escanear página firmada")
-        lbl_titulo.setObjectName("titulo")
-        lay_principal.addWidget(lbl_titulo)
-
-        # ── Panel WIA ────────────────────────
-        grp_wia = QFrame()
-        grp_wia.setObjectName("panel_seccion")
-        lay_wia = QVBoxLayout(grp_wia)
-        lay_wia.setSpacing(8)
-
-        lbl_wia = QLabel("Usar escáner (WIA):")
-        lbl_wia.setObjectName("subtitulo")
-        lay_wia.addWidget(lbl_wia)
-
-        self.btn_wia = QPushButton("▶  Iniciar escaneo")
-        self.btn_wia.setObjectName("btn_primario")
-        self.btn_wia.clicked.connect(self._on_iniciar_wia)
-        lay_wia.addWidget(self.btn_wia)
-
-        self.lbl_estado_wia = QLabel("")
-        self.lbl_estado_wia.setObjectName("lbl_estado")
-        lay_wia.addWidget(self.lbl_estado_wia)
-
-        lay_principal.addWidget(grp_wia)
-
-        # ── Panel manual ─────────────────────
-        grp_manual = QFrame()
-        grp_manual.setObjectName("panel_seccion")
-        lay_manual = QVBoxLayout(grp_manual)
-        lay_manual.setSpacing(8)
-
-        lbl_manual = QLabel("O carga una imagen manualmente:")
-        lbl_manual.setObjectName("subtitulo")
-        lay_manual.addWidget(lbl_manual)
-
-        self.zona_drop = ZonaDrop()
-        self.zona_drop.setMinimumHeight(100)
-        self.zona_drop.archivo_soltado.connect(self._on_imagen_cargada)
-        lay_manual.addWidget(self.zona_drop)
-
-        self.btn_examinar = QPushButton("Examinar…")
-        self.btn_examinar.clicked.connect(self._on_examinar)
-        lay_manual.addWidget(self.btn_examinar)
-
-        lay_principal.addWidget(grp_manual)
-
-        # ── Preview ──────────────────────────
-        self.panel_preview = QFrame()
-        self.panel_preview.setObjectName("panel_preview")
-        lay_prev = QHBoxLayout(self.panel_preview)
-
-        self.lbl_prev_img = QLabel()
-        self.lbl_prev_img.setFixedSize(90, 118)
-        self.lbl_prev_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_prev_img.setObjectName("miniatura_previa")
-        lay_prev.addWidget(self.lbl_prev_img)
-
-        lay_info = QVBoxLayout()
-        self.lbl_prev_nombre = QLabel("")
-        self.lbl_prev_nombre.setWordWrap(True)
-        lay_info.addWidget(self.lbl_prev_nombre)
-
-        btn_cambiar = QPushButton("Cambiar imagen")
-        btn_cambiar.clicked.connect(self._on_cambiar_imagen)
-        lay_info.addWidget(btn_cambiar)
-        lay_prev.addLayout(lay_info)
-
-        self.panel_preview.hide()
-        lay_principal.addWidget(self.panel_preview)
-
-        lay_principal.addStretch()
-
-        # ── Botones finales ───────────────────
-        lay_btns = QHBoxLayout()
-        lay_btns.addStretch()
-
-        btn_cancelar = QPushButton("Cancelar")
-        btn_cancelar.clicked.connect(self.close)
-        lay_btns.addWidget(btn_cancelar)
-
-        self.btn_continuar = QPushButton("Continuar →")
-        self.btn_continuar.setObjectName("btn_primario")
-        self.btn_continuar.setEnabled(False)
-        self.btn_continuar.clicked.connect(self._on_continuar)
-        lay_btns.addWidget(self.btn_continuar)
-
-        lay_principal.addLayout(lay_btns)
-
-    # ── Lógica WIA ───────────────────────────
-    def _on_iniciar_wia(self):
-        self.btn_wia.setEnabled(False)
-        self.lbl_estado_wia.setText("Escaneando…")
-
-        # ✅ FIX: nombre único por cada escaneo → WIA nunca choca con archivo existente
-        nombre_tmp = f"wia_scan_{uuid.uuid4().hex[:8]}.bmp"
-        ruta_tmp = os.path.join(tempfile.gettempdir(), nombre_tmp)
-
-        self._worker = WIAScanWorker(ruta_tmp)
-        self._worker.scan_completado.connect(self._on_imagen_cargada)
-        self._worker.scan_cancelado.connect(self._on_wia_cancelado)
-        self._worker.scan_error.connect(self._on_wia_error)
-        self._worker.start()
-
-    def _on_wia_cancelado(self):
-        self.lbl_estado_wia.setText("Escaneo cancelado.")
-        self._restablecer_btn_wia()
-
-    def _on_wia_error(self, mensaje: str):
-        self._restablecer_btn_wia()
-        self.lbl_estado_wia.setText("")
-        QMessageBox.critical(
-            self,
-            "Error al digitalizar",
-            f"El escáner reportó un error:\n\n{mensaje}\n\n"
-            "Verifica que el escáner esté conectado y encendido."
-        )
-
-    def _restablecer_btn_wia(self):
-        self.btn_wia.setEnabled(True)
-
-    # ── Lógica carga manual ───────────────────
-    def _on_examinar(self):
-        ruta, _ = QFileDialog.getOpenFileName(
-            self,
-            "Seleccionar imagen escaneada",
-            "",
-            "Imágenes (*.bmp *.png *.jpg *.jpeg *.tif *.tiff)"
-        )
-        if ruta:
-            self._on_imagen_cargada(ruta)
-
-    def _on_cambiar_imagen(self):
-        self._ruta_img = None
-        self.lbl_prev_img.clear()    # ✅ FIX: limpiar pixmap anterior
-        self.panel_preview.hide()
-        self.btn_continuar.setEnabled(False)
-
-    # ── Imagen cargada (desde cualquier fuente) ──
-    def _on_imagen_cargada(self, ruta: str):
-        self.lbl_estado_wia.setText("✔ Imagen lista.")
-        self._ruta_img = ruta
-
-        pix = QPixmap(ruta)
-        if not pix.isNull():
-            self.lbl_prev_img.setPixmap(
-                pix.scaled(
-                    self.lbl_prev_img.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-            )
-
-        self.lbl_prev_nombre.setText(os.path.basename(ruta))
-        self.panel_preview.show()
-        self.btn_continuar.setEnabled(True)
-        self._restablecer_btn_wia()
-
-    # ── Continuar ─────────────────────────────
-    def _on_continuar(self):
-        if self._ruta_img:
-            self.escaneo_listo.emit(self._ruta_img)
-            self.close()
-
-    # ── Cierre: limpiar archivos temporales ──
-    def closeEvent(self, event):
-        # Esperar worker si está corriendo
-        if self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(3000)
-
-        # ✅ FIX: eliminar todos los archivos temporales de escaneos anteriores
-        patron = os.path.join(tempfile.gettempdir(), "wia_scan_*.bmp")
-        for f in glob.glob(patron):
+            # ── 1. Convertir imagen a PDF de una sola página ──────────
             try:
-                os.remove(f)
+                import img2pdf
+                with open(self._ruta_imagen, "rb") as f_img:
+                    datos_pdf = img2pdf.convert(f_img)
+                tmp_pag = tempfile.NamedTemporaryFile(
+                    suffix=".pdf", delete=False
+                )
+                tmp_pag.write(datos_pdf)
+                tmp_pag.close()
+                ruta_pag_pdf = tmp_pag.name
+            except ImportError:
+                # Fallback: usar pypdf + Pillow si img2pdf no está
+                from PIL import Image
+                img = Image.open(self._ruta_imagen)
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                tmp_pag = tempfile.NamedTemporaryFile(
+                    suffix=".pdf", delete=False
+                )
+                tmp_pag.close()
+                img.save(tmp_pag.name, "PDF", resolution=150)
+                ruta_pag_pdf = tmp_pag.name
+
+            # ── 2. Reemplazar la página en el PDF original ────────────
+            try:
+                from pypdf import PdfReader, PdfWriter
+            except ImportError:
+                from PyPDF2 import PdfReader, PdfWriter
+
+            lector_orig  = PdfReader(str(self._ruta_pdf))
+            lector_nueva = PdfReader(ruta_pag_pdf)
+            writer = PdfWriter()
+
+            for i, pag in enumerate(lector_orig.pages):
+                if i == self._num_pagina:
+                    # Escalar la nueva página al tamaño original
+                    pag_nueva = lector_nueva.pages[0]
+                    pag_nueva.mediabox = pag.mediabox
+                    writer.add_page(pag_nueva)
+                else:
+                    writer.add_page(pag)
+
+            with open(self._destino, "wb") as f_out:
+                writer.write(f_out)
+
+            # ── 3. Limpiar temporal ───────────────────────────────────
+            try:
+                os.remove(ruta_pag_pdf)
             except Exception:
                 pass
 
-        super().closeEvent(event)
+            self.listo.emit(str(self._destino))
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Widget principal de la Fase 4
+# ─────────────────────────────────────────────────────────────────────────
+class FaseGuardar(QWidget):
+    """
+    Pantalla de confirmación y guardado del documento modificado.
+
+    Señales:
+      guardado_listo(Path)  → PDF guardado correctamente
+      cancelado()           → usuario canceló
+    """
+    guardado_listo = pyqtSignal(object)   # Path
+    cancelado      = pyqtSignal()
+
+    def __init__(self, ruta_pdf: Path, ruta_imagen: str,
+                 num_pagina: int, carpeta_firmados: Path, parent=None):
+        super().__init__(parent)
+        self._ruta_pdf        = ruta_pdf
+        self._ruta_imagen     = ruta_imagen
+        self._num_pagina      = num_pagina
+        self._carpeta_firmados = carpeta_firmados
+        self._worker: _WorkerGuardar | None = None
+        self._construir_ui()
+
+    # ── UI ────────────────────────────────────────────────────────────
+    def _construir_ui(self):
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(0, 0, 0, 0)
+        raiz.setSpacing(0)
+
+        # Cabecera
+        cab = QFrame()
+        cab.setFixedHeight(64)
+        cab.setStyleSheet("""
+            QFrame {
+                background: #f3f0ec;
+                border-bottom: 1px solid rgba(40,37,29,0.10);
+            }
+        """)
+        lay_cab = QHBoxLayout(cab)
+        lay_cab.setContentsMargins(20, 0, 20, 0)
+
+        nombre_pdf = os.path.basename(str(self._ruta_pdf))
+        lbl_titulo = QLabel(
+            f"Guardar  ·  Página {self._num_pagina + 1}  ·  {nombre_pdf}"
+        )
+        font_cab = QFont("Segoe UI", 13)
+        font_cab.setWeight(QFont.Weight.Medium)
+        lbl_titulo.setFont(font_cab)
+        lbl_titulo.setStyleSheet("color: #28251d;")
+        lay_cab.addWidget(lbl_titulo)
+
+        lay_cab.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding,
+                        QSizePolicy.Policy.Minimum)
+        )
+
+        btn_volver = QPushButton("← Volver al escaneo")
+        btn_volver.setFixedHeight(36)
+        btn_volver.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #7a7974;
+                border: 1px solid rgba(40,37,29,0.22);
+                border-radius: 6px;
+                padding: 0 16px;
+                font-size: 13px;
+            }
+            QPushButton:hover { color: #28251d; border-color: rgba(40,37,29,0.45); }
+        """)
+        btn_volver.clicked.connect(self.cancelado)
+        lay_cab.addWidget(btn_volver)
+        raiz.addWidget(cab)
+
+        # Cuerpo
+        cuerpo = QWidget()
+        cuerpo.setStyleSheet("background: #f7f6f2;")
+        lay_cuerpo = QVBoxLayout(cuerpo)
+        lay_cuerpo.setContentsMargins(40, 28, 40, 28)
+        lay_cuerpo.setSpacing(20)
+
+        # ── Preview de la imagen ──────────────────────────────────────
+        panel_prev = QFrame()
+        panel_prev.setStyleSheet("""
+            QFrame {
+                background: #f9f8f5;
+                border: 1px solid rgba(1,105,111,0.25);
+                border-radius: 10px;
+            }
+        """)
+        lay_prev = QHBoxLayout(panel_prev)
+        lay_prev.setContentsMargins(16, 16, 16, 16)
+        lay_prev.setSpacing(16)
+
+        self.lbl_img = QLabel()
+        self.lbl_img.setFixedSize(90, 118)
+        self.lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_img.setStyleSheet("background: #edeae5; border-radius: 4px;")
+        self._cargar_preview()
+        lay_prev.addWidget(self.lbl_img)
+
+        info_col = QVBoxLayout()
+        info_col.setSpacing(4)
+
+        lbl_tag = QLabel("IMAGEN ESCANEADA")
+        lbl_tag.setStyleSheet(
+            "font-size: 11px; font-weight: 700; color: #7a7974;"
+            "letter-spacing: 1px;"
+        )
+        info_col.addWidget(lbl_tag)
+
+        lbl_nombre_img = QLabel(os.path.basename(self._ruta_imagen))
+        font_n = QFont("Segoe UI", 12)
+        font_n.setWeight(QFont.Weight.Medium)
+        lbl_nombre_img.setFont(font_n)
+        lbl_nombre_img.setStyleSheet("color: #28251d;")
+        info_col.addWidget(lbl_nombre_img)
+
+        lbl_ruta_img = QLabel(self._ruta_imagen)
+        lbl_ruta_img.setStyleSheet("color: #7a7974; font-size: 11px;")
+        lbl_ruta_img.setWordWrap(True)
+        info_col.addWidget(lbl_ruta_img)
+
+        info_col.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
+                        QSizePolicy.Policy.Expanding)
+        )
+        lay_prev.addLayout(info_col)
+        lay_cuerpo.addWidget(panel_prev)
+
+        # ── Campo nombre del archivo ──────────────────────────────────
+        panel_nombre = QFrame()
+        panel_nombre.setStyleSheet("""
+            QFrame {
+                background: #f9f8f5;
+                border: 1px solid rgba(40,37,29,0.10);
+                border-radius: 10px;
+            }
+        """)
+        lay_nombre = QVBoxLayout(panel_nombre)
+        lay_nombre.setContentsMargins(20, 18, 20, 18)
+        lay_nombre.setSpacing(8)
+
+        lbl_campo = QLabel("Nombre del documento a guardar")
+        font_h = QFont("Segoe UI", 12)
+        font_h.setWeight(QFont.Weight.Medium)
+        lbl_campo.setFont(font_h)
+        lbl_campo.setStyleSheet("color: #28251d;")
+        lay_nombre.addWidget(lbl_campo)
+
+        lbl_sub = QLabel(
+            "El archivo se guardará en la carpeta pdfs_firmados/ con este nombre."
+        )
+        lbl_sub.setStyleSheet("color: #7a7974; font-size: 12px;")
+        lay_nombre.addWidget(lbl_sub)
+
+        fila_input = QHBoxLayout()
+        fila_input.setSpacing(8)
+
+        self.input_nombre = QLineEdit()
+        self.input_nombre.setFixedHeight(38)
+        self.input_nombre.setPlaceholderText("ej: contrato_firmado")
+        self.input_nombre.setStyleSheet("""
+            QLineEdit {
+                background: white;
+                border: 1px solid rgba(40,37,29,0.22);
+                border-radius: 6px;
+                padding: 0 12px;
+                font-size: 13px;
+                color: #28251d;
+            }
+            QLineEdit:focus {
+                border: 1.5px solid #01696f;
+            }
+        """)
+        # Sugerir nombre basado en el PDF original
+        stem = Path(str(self._ruta_pdf)).stem
+        # Quitar prefijos de re-edición si los hay
+        if stem.startswith("reedit_"):
+            stem = stem[len("reedit_"):]
+        self.input_nombre.setText(stem)
+        self.input_nombre.selectAll()
+        fila_input.addWidget(self.input_nombre)
+
+        lbl_ext = QLabel(".pdf")
+        lbl_ext.setStyleSheet("color: #7a7974; font-size: 13px;")
+        fila_input.addWidget(lbl_ext)
+        lay_nombre.addLayout(fila_input)
+
+        self.lbl_error_nombre = QLabel("")
+        self.lbl_error_nombre.setStyleSheet(
+            "color: #a13544; font-size: 12px;"
+        )
+        self.lbl_error_nombre.hide()
+        lay_nombre.addWidget(self.lbl_error_nombre)
+
+        lay_cuerpo.addWidget(panel_nombre)
+        lay_cuerpo.addStretch()
+
+        raiz.addWidget(cuerpo, 1)
+        raiz.addWidget(self._barra_inferior())
+
+    def _cargar_preview(self):
+        pm = QPixmap(self._ruta_imagen)
+        if not pm.isNull():
+            self.lbl_img.setPixmap(
+                pm.scaled(
+                    90, 118,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+    def _barra_inferior(self) -> QFrame:
+        barra = QFrame()
+        barra.setFixedHeight(64)
+        barra.setStyleSheet("""
+            QFrame {
+                background: #f9f8f5;
+                border-top: 1px solid rgba(40,37,29,0.10);
+            }
+        """)
+        lay = QHBoxLayout(barra)
+        lay.setContentsMargins(20, 0, 20, 0)
+
+        self.lbl_estado = QLabel("Revisá el nombre y confirmá para guardar.")
+        self.lbl_estado.setStyleSheet("color: #7a7974; font-size: 13px;")
+        lay.addWidget(self.lbl_estado)
+
+        lay.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding,
+                        QSizePolicy.Policy.Minimum)
+        )
+
+        self.btn_guardar = QPushButton("Guardar documento  ✓")
+        self.btn_guardar.setFixedHeight(40)
+        self.btn_guardar.setStyleSheet("""
+            QPushButton {
+                background: #437a22;
+                color: white;
+                border: none;
+                border-radius: 7px;
+                padding: 0 22px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover   { background: #2e5c10; }
+            QPushButton:pressed { background: #1e3f0a; }
+            QPushButton:disabled { background: #dcd9d5; color: #bab9b4; }
+        """)
+        self.btn_guardar.clicked.connect(self._on_guardar)
+        lay.addWidget(self.btn_guardar)
+
+        return barra
+
+    # ── Lógica de guardado ────────────────────────────────────────────
+    def _on_guardar(self):
+        nombre = self.input_nombre.text().strip()
+        if not nombre:
+            self.lbl_error_nombre.setText("El nombre no puede estar vacío.")
+            self.lbl_error_nombre.show()
+            self.input_nombre.setFocus()
+            return
+
+        # Limpiar caracteres inválidos en nombres de archivo
+        caracteres_invalidos = set('/\\:*?"<>|')
+        if any(c in nombre for c in caracteres_invalidos):
+            self.lbl_error_nombre.setText(
+                'El nombre no puede contener: / \\ : * ? " < > |'
+            )
+            self.lbl_error_nombre.show()
+            return
+
+        self.lbl_error_nombre.hide()
+
+        if not nombre.lower().endswith(".pdf"):
+            nombre += ".pdf"
+
+        destino = self._carpeta_firmados / nombre
+
+        # Avisar si ya existe y confirmar sobreescritura
+        if destino.exists():
+            resp = QMessageBox.question(
+                self,
+                "Archivo existente",
+                f"Ya existe un archivo con ese nombre:\n{nombre}\n\n"
+                "¿Querés reemplazarlo?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+
+        self._set_guardando(True)
+
+        self._worker = _WorkerGuardar(
+            self._ruta_pdf,
+            self._ruta_imagen,
+            self._num_pagina,
+            destino,
+            parent=self,
+        )
+        self._worker.listo.connect(self._on_listo)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _set_guardando(self, guardando: bool):
+        self.btn_guardar.setEnabled(not guardando)
+        self.input_nombre.setEnabled(not guardando)
+        if guardando:
+            self.btn_guardar.setText("Guardando…")
+            self.lbl_estado.setText("Procesando PDF, un momento…")
+            self.lbl_estado.setStyleSheet(
+                "color: #01696f; font-size: 13px; font-weight: 600;"
+            )
+        else:
+            self.btn_guardar.setText("Guardar documento  ✓")
+            self.lbl_estado.setText("Revisá el nombre y confirmá para guardar.")
+            self.lbl_estado.setStyleSheet("color: #7a7974; font-size: 13px;")
+
+    def _on_listo(self, ruta_str: str):
+        self._set_guardando(False)
+        self.guardado_listo.emit(Path(ruta_str))
+
+    def _on_error(self, mensaje: str):
+        self._set_guardando(False)
+        QMessageBox.critical(
+            self,
+            "Error al guardar",
+            f"No se pudo guardar el documento:\n\n{mensaje}\n\n"
+            "Verificá que pypdf (o PyPDF2) y Pillow estén instalados."
+        )
