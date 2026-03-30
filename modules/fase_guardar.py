@@ -101,6 +101,43 @@ def _normalizar_modo_pillow(img):
     log.debug("_normalizar_modo_pillow — %s → RGB", modo)
     return img_rgb
 
+def _imagen_a_pdf_reportlab(ruta_imagen: str) -> str:
+    """Convierte imagen a PDF de una página usando reportlab.
+    Motor principal — más robusto que img2pdf en Windows con JPG/PNG/BMP.
+    """
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+    from PIL import Image
+
+    with Image.open(ruta_imagen) as img:
+        ancho_px, alto_px = img.size
+        dpi = img.info.get("dpi", (150, 150))
+        if isinstance(dpi, (int, float)):
+            dpi = (dpi, dpi)
+        dpi_x = dpi[0] if dpi[0] > 0 else 150
+        dpi_y = dpi[1] if dpi[1] > 0 else 150
+
+    ancho_pt = ancho_px * 72.0 / dpi_x
+    alto_pt  = alto_px  * 72.0 / dpi_y
+    log.debug("reportlab: %dx%d px @ %s dpi → %.1fx%.1f pt",
+              ancho_px, alto_px, dpi, ancho_pt, alto_pt)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp.close()
+
+    c = canvas.Canvas(tmp.name, pagesize=(ancho_pt, alto_pt))
+    c.drawImage(ImageReader(ruta_imagen), 0, 0,
+                width=ancho_pt, height=alto_pt,
+                preserveAspectRatio=False)
+    c.save()
+
+    tamaño = Path(tmp.name).stat().st_size
+    if tamaño == 0:
+        _borrar_si_existe(tmp.name)
+        raise RuntimeError("reportlab generó un PDF vacío (0 bytes)")
+
+    log.debug("reportlab: OK — %d bytes → %s", tamaño, tmp.name)
+    return tmp.name
 
 def _imagen_a_pdf_pillow(ruta_imagen: str) -> str:
     """Convierte una imagen a PDF de una página usando Pillow.
@@ -186,35 +223,33 @@ def _borrar_si_existe(ruta: str) -> None:
 
 
 def _convertir_imagen_a_pdf(ruta_imagen: str) -> str:
-    """Motor principal de conversión imagen → PDF de una página.
+    # ── Intento 1: reportlab (motor principal) ───────────────────────
+    try:
+        ruta = _imagen_a_pdf_reportlab(ruta_imagen)
+        log.debug("_convertir_imagen_a_pdf: reportlab exitoso → %s", ruta)
+        return ruta
+    except ImportError:
+        log.debug("reportlab no instalado, probando img2pdf")
+    except Exception as e_rl:
+        log.warning("reportlab falló (%s: %s) — probando img2pdf",
+                    type(e_rl).__name__, e_rl)
 
-    Estrategia (v8):
-      1. Intentar img2pdf en subproceso aislado — más fiel (sin recompresión
-         JPEG). Si el subproceso crashea, el proceso principal sobrevive y se
-         registra como WARNING.
-      2. Pillow — robusto, soporta todos los formatos y modos de color.
-
-    Devuelve la ruta del PDF temporal. Lanza excepción si ambos fallan.
-    """
-    # ── Intento 1: img2pdf (subproceso aislado) ──────────────────────
+    # ── Intento 2: img2pdf en subproceso aislado ─────────────────────
     try:
         ruta = _imagen_a_pdf_img2pdf(ruta_imagen)
         log.debug("_convertir_imagen_a_pdf: img2pdf (subprocess) exitoso → %s", ruta)
         return ruta
     except ImportError:
-        log.debug("_convertir_imagen_a_pdf: img2pdf no instalado, usando Pillow")
+        log.debug("img2pdf no instalado, usando Pillow")
     except Exception as e_i2p:
-        log.warning(
-            "_convertir_imagen_a_pdf: img2pdf falló (%s: %s) — usando Pillow como fallback",
-            type(e_i2p).__name__, e_i2p,
-        )
+        log.warning("img2pdf falló (%s: %s) — usando Pillow como fallback",
+                    type(e_i2p).__name__, e_i2p)
 
-    # ── Intento 2: Pillow (motor de fallback robusto) ────────────────
+    # ── Intento 3: Pillow (último fallback) ──────────────────────────
     log.debug("_convertir_imagen_a_pdf: ejecutando conversión con Pillow")
     ruta = _imagen_a_pdf_pillow(ruta_imagen)
     log.debug("_convertir_imagen_a_pdf: Pillow exitoso → %s", ruta)
     return ruta
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Worker: convierte imagen → página PDF y reemplaza en hilo secundario

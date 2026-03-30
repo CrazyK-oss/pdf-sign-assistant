@@ -5,3 +5,4 @@ img2pdf
 pypdf
 watchdog
 pywin32
+reportlab
