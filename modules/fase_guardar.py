@@ -12,30 +12,24 @@ Emite:
   - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
   - cancelado()           → el usuario descartó la operación
 
-Correcciones críticas (v7)
+Correcciones críticas (v8)
 ---------------------------
-* BUGFIX PRINCIPAL (v7): img2pdf puede crashear el hilo sin lanzar una
-  excepción Python visible (error interno de C / pikepdf / etc.) dejando el
-  log cortado en el 10 %. Solución: Pillow es ahora el motor PRINCIPAL de
-  conversión imagen→PDF. img2pdf se intenta primero como optimización (sin
-  recompresión JPEG) pero cualquier fallo —incluidos los que no son
-  ImportError— cae silenciosamente al path de Pillow con log de advertencia.
-  Logging granular antes y después de cada llamada a librería externa para
-  que nunca más haya un "murió en silencio".
+* BUGFIX PRINCIPAL (v8): img2pdf puede crashear el proceso a nivel de extensión
+  C (pikepdf/libjpeg/etc.) incluso dentro de un try/except — Python nunca llega
+  a atrapar la excepción porque el crash ocurre por debajo del intérprete.
+  Solución: img2pdf se ejecuta en un SUBPROCESO SEPARADO con subprocess.run().
+  Si el subproceso muere (returncode != 0, timeout, o cualquier excepción), el
+  proceso principal NO se ve afectado y cae automáticamente al fallback Pillow.
 
-* BLINDAJE DE MODO DE COLOR (v7): se normaliza el modo de la imagen antes de
-  guardar con Pillow. Modos soportados para PDF: RGB y L (escala de grises).
-  Cualquier otro (RGBA, P, CMYK, LAB, …) se convierte a RGB con fondo blanco
-  para RGBA/PA o directamente para el resto.
-
-* Conservado de v6: señal interna _despachar_guardado_listo con
-  QueuedConnection, logging detallado en todos los slots, guard
-  anti-doble-disparo, worker sin parent=, _ruta_final_pendiente,
-  closeEvent con wait(), herencia de QDialog.
+* Conservado de v7: Pillow como motor principal de fallback, normalización de
+  modo de color, logging granular, guard anti-doble-disparo, worker sin parent=,
+  señal interna _despachar_guardado_listo con QueuedConnection, closeEvent.
 """
 
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -53,6 +47,23 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Script auxiliar que corre img2pdf en subproceso aislado
+# ─────────────────────────────────────────────────────────────────────────
+
+# Código Python inline que se ejecuta en el subproceso hijo.
+# Recibe la ruta de la imagen por argv[1] y escribe el PDF en argv[2].
+_IMG2PDF_WORKER_SCRIPT = """
+import sys, img2pdf
+ruta_img = sys.argv[1]
+ruta_out  = sys.argv[2]
+with open(ruta_img, "rb") as f:
+    datos = img2pdf.convert(f)
+with open(ruta_out, "wb") as f:
+    f.write(datos)
+"""
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -113,39 +124,82 @@ def _imagen_a_pdf_pillow(ruta_imagen: str) -> str:
 
 
 def _imagen_a_pdf_img2pdf(ruta_imagen: str) -> str:
-    """Intenta convertir una imagen a PDF usando img2pdf (sin recompresión JPEG).
+    """Intenta convertir la imagen a PDF usando img2pdf en un subproceso aislado.
 
-    Devuelve la ruta del archivo temporal. Lanza excepción si falla por
-    cualquier motivo (no solo ImportError).
+    Si img2pdf crashea a nivel nativo (extensión C), el crash ocurre en el
+    subproceso hijo — el proceso principal sobrevive y este método lanza
+    RuntimeError para que el llamador use Pillow como fallback.
+
+    Devuelve la ruta del PDF temporal. Lanza excepción si falla por cualquier
+    motivo (ImportError, crash nativo, timeout, error de escritura…).
     """
-    import img2pdf  # puede lanzar ImportError
-    log.debug("img2pdf: abriendo imagen %s", ruta_imagen)
-    with open(ruta_imagen, "rb") as f_img:
-        log.debug("img2pdf: llamando img2pdf.convert …")
-        datos_pdf = img2pdf.convert(f_img)
-    log.debug("img2pdf: convert OK — %d bytes de PDF generados", len(datos_pdf))
-    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    tmp.write(datos_pdf)
-    tmp.close()
-    log.debug("img2pdf: PDF escrito en %s — tamaño=%d bytes",
-              tmp.name, Path(tmp.name).stat().st_size)
-    return tmp.name
+    # Verificar que img2pdf está instalado antes de lanzar el subproceso.
+    try:
+        import importlib
+        importlib.import_module("img2pdf")
+    except ImportError as exc:
+        raise ImportError("img2pdf no está instalado") from exc
+
+    tmp_out = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    tmp_out.close()
+
+    log.debug("img2pdf (subprocess): lanzando subproceso para %s → %s",
+              ruta_imagen, tmp_out.name)
+    try:
+        resultado = subprocess.run(
+            [sys.executable, "-c", _IMG2PDF_WORKER_SCRIPT,
+             ruta_imagen, tmp_out.name],
+            capture_output=True,
+            timeout=60,          # máximo 60 s para la conversión
+        )
+    except subprocess.TimeoutExpired as exc:
+        _borrar_si_existe(tmp_out.name)
+        raise RuntimeError("img2pdf: timeout tras 60 s") from exc
+    except Exception as exc:
+        _borrar_si_existe(tmp_out.name)
+        raise RuntimeError(f"img2pdf: error al lanzar subproceso — {exc}") from exc
+
+    if resultado.returncode != 0:
+        stderr = resultado.stderr.decode(errors="replace").strip()
+        stdout = resultado.stdout.decode(errors="replace").strip()
+        _borrar_si_existe(tmp_out.name)
+        raise RuntimeError(
+            f"img2pdf subproceso terminó con código {resultado.returncode}.\n"
+            f"stderr: {stderr}\nstdout: {stdout}"
+        )
+
+    tamaño = Path(tmp_out.name).stat().st_size
+    if tamaño == 0:
+        _borrar_si_existe(tmp_out.name)
+        raise RuntimeError("img2pdf generó un PDF vacío (0 bytes)")
+
+    log.debug("img2pdf (subprocess): OK — %d bytes → %s", tamaño, tmp_out.name)
+    return tmp_out.name
+
+
+def _borrar_si_existe(ruta: str) -> None:
+    try:
+        if ruta and Path(ruta).exists():
+            os.remove(ruta)
+    except Exception:
+        pass
 
 
 def _convertir_imagen_a_pdf(ruta_imagen: str) -> str:
     """Motor principal de conversión imagen → PDF de una página.
 
-    Estrategia (v7):
-      1. Intentar img2pdf — más fiel (sin recompresión JPEG).
-         Si falla por CUALQUIER razón, se registra como WARNING y se sigue.
+    Estrategia (v8):
+      1. Intentar img2pdf en subproceso aislado — más fiel (sin recompresión
+         JPEG). Si el subproceso crashea, el proceso principal sobrevive y se
+         registra como WARNING.
       2. Pillow — robusto, soporta todos los formatos y modos de color.
 
     Devuelve la ruta del PDF temporal. Lanza excepción si ambos fallan.
     """
-    # ── Intento 1: img2pdf ───────────────────────────────────────────
+    # ── Intento 1: img2pdf (subproceso aislado) ──────────────────────
     try:
         ruta = _imagen_a_pdf_img2pdf(ruta_imagen)
-        log.debug("_convertir_imagen_a_pdf: img2pdf exitoso → %s", ruta)
+        log.debug("_convertir_imagen_a_pdf: img2pdf (subprocess) exitoso → %s", ruta)
         return ruta
     except ImportError:
         log.debug("_convertir_imagen_a_pdf: img2pdf no instalado, usando Pillow")
@@ -155,7 +209,7 @@ def _convertir_imagen_a_pdf(ruta_imagen: str) -> str:
             type(e_i2p).__name__, e_i2p,
         )
 
-    # ── Intento 2: Pillow (motor principal) ─────────────────────────
+    # ── Intento 2: Pillow (motor de fallback robusto) ────────────────
     log.debug("_convertir_imagen_a_pdf: ejecutando conversión con Pillow")
     ruta = _imagen_a_pdf_pillow(ruta_imagen)
     log.debug("_convertir_imagen_a_pdf: Pillow exitoso → %s", ruta)
@@ -247,12 +301,8 @@ class _WorkerGuardar(QThread):
                       self._destino.stat().st_size)
 
             # Limpieza temporal
-            try:
-                os.remove(ruta_pag_pdf)
-                log.debug("Temporal eliminado: %s", ruta_pag_pdf)
-            except Exception as e_rm:
-                log.warning("No se pudo eliminar temporal %s: %s",
-                            ruta_pag_pdf, e_rm)
+            _borrar_si_existe(ruta_pag_pdf)
+            log.debug("Temporal eliminado: %s", ruta_pag_pdf)
 
             self.progreso.emit(100, "¡Listo!")
             log.debug("Worker terminado exitosamente — emitiendo listo")
@@ -262,10 +312,7 @@ class _WorkerGuardar(QThread):
             tb = traceback.format_exc()
             log.error("Error en worker:\n%s", tb)
             if ruta_pag_pdf:
-                try:
-                    os.remove(ruta_pag_pdf)
-                except Exception:
-                    pass
+                _borrar_si_existe(ruta_pag_pdf)
             self.error.emit(f"{e}\n\n─── Traceback completo ───\n{tb}")
 
 
