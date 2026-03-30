@@ -2,7 +2,10 @@
 # Fase 3: Stand-by post-impresión.
 # Digitalización directa via WIA (Windows Image Acquisition) + carga manual.
 
+
 import os
+import glob
+import uuid
 import tempfile
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -10,6 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QDragEnterEvent, QDropEvent
+
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -20,9 +24,20 @@ class WIAScanWorker(QThread):
     scan_cancelado  = pyqtSignal()
     scan_error      = pyqtSignal(str)
 
+
     def run(self):
         try:
             import win32com.client
+
+            # Limpiar escaneos temporales anteriores para evitar
+            # el error WIA "Este archivo ya existe" en el segundo escaneo
+            for f in glob.glob(
+                os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
+            ):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
 
             # WIA.CommonDialog — el mismo motor que "Fax y Escáner de Windows"
             wia = win32com.client.Dispatch("WIA.CommonDialog")
@@ -46,9 +61,9 @@ class WIAScanWorker(QThread):
                 True
             )
 
-            ruta_destino = os.path.join(
-                tempfile.gettempdir(), "pdf_sign_assistant_scan.png"
-            )
+            # Nombre único por escaneo → WIA nunca choca con un archivo previo
+            nombre = f"pdf_sign_scan_{uuid.uuid4().hex[:8]}.png"
+            ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
             img_wia.SaveFile(ruta_destino)
             self.scan_completado.emit(ruta_destino)
 
@@ -61,6 +76,7 @@ class WIAScanWorker(QThread):
                 self.scan_error.emit(str(e))
 
 
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Zona de drag & drop
 #  NOTA: el clic para abrir el explorador lo maneja el botón "Examinar"
@@ -70,6 +86,7 @@ class WIAScanWorker(QThread):
 class ZonaDrop(QFrame):
     imagen_soltada = pyqtSignal(str)
 
+
     _ESTILO_BASE = """
         ZonaDrop {{
             background: {bg};
@@ -78,15 +95,18 @@ class ZonaDrop(QFrame):
         }}
     """
 
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setMinimumHeight(120)
         self._set_estado_normal()
 
+
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.setSpacing(6)
+
 
         self.lbl_icono = QLabel("⬇")
         self.lbl_icono.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -95,6 +115,7 @@ class ZonaDrop(QFrame):
         )
         lay.addWidget(self.lbl_icono)
 
+
         lbl_txt = QLabel("Arrastra una imagen aquí")
         lbl_txt.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_txt.setStyleSheet(
@@ -102,15 +123,18 @@ class ZonaDrop(QFrame):
         )
         lay.addWidget(lbl_txt)
 
+
     def _set_estado_normal(self):
         self.setStyleSheet(
             self._ESTILO_BASE.format(bg="#f3f0ec", border="rgba(40,37,29,0.18)")
         )
 
+
     def _set_estado_hover(self):
         self.setStyleSheet(
             self._ESTILO_BASE.format(bg="#e4f2f1", border="#01696f")
         )
+
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
@@ -123,14 +147,17 @@ class ZonaDrop(QFrame):
                 return
         e.ignore()
 
+
     def dragLeaveEvent(self, e):
         self._set_estado_normal()
+
 
     def dropEvent(self, e: QDropEvent):
         self._set_estado_normal()
         if e.mimeData().hasUrls():
             ruta = e.mimeData().urls()[0].toLocalFile()
             self.imagen_soltada.emit(ruta)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -145,6 +172,7 @@ class VistaEscaneo(QWidget):
     imagen_lista = pyqtSignal(str)
     cancelar     = pyqtSignal()
 
+
     def __init__(self, ruta_pdf: str, num_pagina: int, parent=None):
         super().__init__(parent)
         self.ruta_pdf    = ruta_pdf
@@ -153,11 +181,13 @@ class VistaEscaneo(QWidget):
         self._worker     = None
         self._construir_ui()
 
+
     # ── Construcción de la UI ──────────────────────────────────────────
     def _construir_ui(self):
         raiz = QVBoxLayout(self)
         raiz.setContentsMargins(0, 0, 0, 0)
         raiz.setSpacing(0)
+
 
         # ── Cabecera ────────────────────────────────────────────────────
         cab = QFrame()
@@ -171,6 +201,7 @@ class VistaEscaneo(QWidget):
         lay_cab = QHBoxLayout(cab)
         lay_cab.setContentsMargins(20, 0, 20, 0)
 
+
         nombre = os.path.basename(self.ruta_pdf)
         lbl_titulo = QLabel(
             f"Escanear  ·  Página {self.num_pagina + 1}  ·  {nombre}"
@@ -181,9 +212,11 @@ class VistaEscaneo(QWidget):
         lbl_titulo.setStyleSheet("color: #28251d;")
         lay_cab.addWidget(lbl_titulo)
 
+
         lay_cab.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         )
+
 
         btn_volver = QPushButton("← Volver a páginas")
         btn_volver.setFixedHeight(36)
@@ -202,12 +235,14 @@ class VistaEscaneo(QWidget):
         lay_cab.addWidget(btn_volver)
         raiz.addWidget(cab)
 
+
         # ── Contenido central ────────────────────────────────────────────
         cuerpo = QWidget()
         cuerpo.setStyleSheet("background: #f7f6f2;")
         lay_cuerpo = QVBoxLayout(cuerpo)
         lay_cuerpo.setContentsMargins(40, 28, 40, 28)
         lay_cuerpo.setSpacing(20)
+
 
         lbl_desc = QLabel(
             f"La página {self.num_pagina + 1} fue enviada a la impresora. "
@@ -218,6 +253,7 @@ class VistaEscaneo(QWidget):
         lbl_desc.setStyleSheet("color: #7a7974; font-size: 13px;")
         lay_cuerpo.addWidget(lbl_desc)
 
+
         # ── Fila: dos paneles de opciones ────────────────────────────────
         fila = QHBoxLayout()
         fila.setSpacing(16)
@@ -226,11 +262,14 @@ class VistaEscaneo(QWidget):
         fila.addWidget(self._panel_manual())
         lay_cuerpo.addLayout(fila)
 
+
         # ── Panel de preview (oculto hasta tener imagen) ─────────────────
         lay_cuerpo.addWidget(self._panel_preview())
 
+
         raiz.addWidget(cuerpo, 1)
         raiz.addWidget(self._barra_inferior())
+
 
     def _panel_wia(self) -> QFrame:
         panel = QFrame()
@@ -245,13 +284,16 @@ class VistaEscaneo(QWidget):
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(10)
 
+
         font_h = QFont("Segoe UI", 12)
         font_h.setWeight(QFont.Weight.Medium)
+
 
         t = QLabel("Digitalizar con el escáner")
         t.setFont(font_h)
         t.setStyleSheet("color: #28251d;")
         lay.addWidget(t)
+
 
         d = QLabel(
             "Usa el escáner conectado vía WIA.\n"
@@ -262,9 +304,11 @@ class VistaEscaneo(QWidget):
         d.setStyleSheet("color: #7a7974; font-size: 12px;")
         lay.addWidget(d)
 
+
         lay.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         )
+
 
         self.btn_digitalizar = QPushButton("Digitalizar")
         self.btn_digitalizar.setFixedHeight(42)
@@ -285,13 +329,16 @@ class VistaEscaneo(QWidget):
         self.btn_digitalizar.clicked.connect(self._on_digitalizar)
         lay.addWidget(self.btn_digitalizar)
 
+
         self.lbl_wia_estado = QLabel("")
         self.lbl_wia_estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_wia_estado.setStyleSheet("color: #7a7974; font-size: 11px;")
         self.lbl_wia_estado.hide()
         lay.addWidget(self.lbl_wia_estado)
 
+
         return panel
+
 
     def _separador_o(self) -> QLabel:
         lbl = QLabel("o")
@@ -299,6 +346,7 @@ class VistaEscaneo(QWidget):
         lbl.setFixedWidth(28)
         lbl.setStyleSheet("color: #bab9b4; font-size: 13px;")
         return lbl
+
 
     def _panel_manual(self) -> QFrame:
         panel = QFrame()
@@ -313,22 +361,27 @@ class VistaEscaneo(QWidget):
         lay.setContentsMargins(20, 20, 20, 20)
         lay.setSpacing(10)
 
+
         font_h = QFont("Segoe UI", 12)
         font_h.setWeight(QFont.Weight.Medium)
+
 
         t = QLabel("Cargar imagen manualmente")
         t.setFont(font_h)
         t.setStyleSheet("color: #28251d;")
         lay.addWidget(t)
 
+
         d = QLabel("Arrastra una imagen a la zona de abajo,\no examina tus carpetas.")
         d.setWordWrap(True)
         d.setStyleSheet("color: #7a7974; font-size: 12px;")
         lay.addWidget(d)
 
+
         self.zona_drop = ZonaDrop()
         self.zona_drop.imagen_soltada.connect(self._on_imagen_recibida)
         lay.addWidget(self.zona_drop)
+
 
         btn_examinar = QPushButton("Examinar archivos…")
         btn_examinar.setFixedHeight(36)
@@ -350,7 +403,9 @@ class VistaEscaneo(QWidget):
         btn_examinar.clicked.connect(self._on_examinar)
         lay.addWidget(btn_examinar)
 
+
         return panel
+
 
     def _panel_preview(self) -> QFrame:
         self.panel_preview = QFrame()
@@ -365,6 +420,7 @@ class VistaEscaneo(QWidget):
         lay.setContentsMargins(16, 14, 16, 14)
         lay.setSpacing(16)
 
+
         self.lbl_prev_img = QLabel()
         self.lbl_prev_img.setFixedSize(90, 118)
         self.lbl_prev_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -372,6 +428,7 @@ class VistaEscaneo(QWidget):
             "background: #edeae5; border-radius: 4px;"
         )
         lay.addWidget(self.lbl_prev_img)
+
 
         info = QVBoxLayout()
         self.lbl_prev_nombre = QLabel("—")
@@ -381,10 +438,12 @@ class VistaEscaneo(QWidget):
         self.lbl_prev_nombre.setStyleSheet("color: #28251d;")
         info.addWidget(self.lbl_prev_nombre)
 
+
         self.lbl_prev_ruta = QLabel("")
         self.lbl_prev_ruta.setStyleSheet("color: #7a7974; font-size: 11px;")
         self.lbl_prev_ruta.setWordWrap(True)
         info.addWidget(self.lbl_prev_ruta)
+
 
         info.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
@@ -393,6 +452,7 @@ class VistaEscaneo(QWidget):
         lay.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         )
+
 
         btn_cambiar = QPushButton("Cambiar imagen")
         btn_cambiar.setFixedHeight(32)
@@ -410,8 +470,10 @@ class VistaEscaneo(QWidget):
         btn_cambiar.clicked.connect(self._on_cambiar_imagen)
         lay.addWidget(btn_cambiar)
 
+
         self.panel_preview.hide()
         return self.panel_preview
+
 
     def _barra_inferior(self) -> QFrame:
         barra = QFrame()
@@ -425,13 +487,16 @@ class VistaEscaneo(QWidget):
         lay = QHBoxLayout(barra)
         lay.setContentsMargins(20, 0, 20, 0)
 
+
         self.lbl_estado_inf = QLabel("Esperando imagen…")
         self.lbl_estado_inf.setStyleSheet("color: #7a7974; font-size: 13px;")
         lay.addWidget(self.lbl_estado_inf)
 
+
         lay.addSpacerItem(
             QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         )
+
 
         self.btn_usar = QPushButton("Usar esta imagen  →")
         self.btn_usar.setFixedHeight(40)
@@ -453,7 +518,9 @@ class VistaEscaneo(QWidget):
         self.btn_usar.clicked.connect(self._on_usar_imagen)
         lay.addWidget(self.btn_usar)
 
+
         return barra
+
 
     # ── Lógica WIA ─────────────────────────────────────────────────────
     def _on_digitalizar(self):
@@ -467,10 +534,12 @@ class VistaEscaneo(QWidget):
             )
             return
 
+
         self.btn_digitalizar.setEnabled(False)
         self.btn_digitalizar.setText("Escaneando…")
         self.lbl_wia_estado.setText("Abriendo diálogo WIA…")
         self.lbl_wia_estado.show()
+
 
         self._worker = WIAScanWorker()
         self._worker.scan_completado.connect(self._on_imagen_recibida)
@@ -478,10 +547,12 @@ class VistaEscaneo(QWidget):
         self._worker.scan_error.connect(self._on_wia_error)
         self._worker.start()
 
+
     def _restablecer_btn_wia(self):
         self.btn_digitalizar.setEnabled(True)
         self.btn_digitalizar.setText("Digitalizar")
         self.lbl_wia_estado.hide()
+
 
     def _on_wia_error(self, msg: str):
         self._restablecer_btn_wia()
@@ -490,6 +561,7 @@ class VistaEscaneo(QWidget):
             f"El escáner reportó un error:\n\n{msg}\n\n"
             "Verifica que el escáner esté conectado y encendido."
         )
+
 
     # ── Lógica manual ───────────────────────────────────────────────────
     def _on_examinar(self):
@@ -501,10 +573,12 @@ class VistaEscaneo(QWidget):
         if ruta:
             self._on_imagen_recibida(ruta)
 
+
     # ── Imagen recibida (cualquier fuente) ──────────────────────────────
     def _on_imagen_recibida(self, ruta: str):
         self._ruta_img = ruta
         self._restablecer_btn_wia()
+
 
         # Preview
         pm = QPixmap(ruta)
@@ -517,16 +591,19 @@ class VistaEscaneo(QWidget):
                 )
             )
 
+
         nombre = os.path.basename(ruta)
         self.lbl_prev_nombre.setText(nombre)
         self.lbl_prev_ruta.setText(ruta)
         self.panel_preview.show()
+
 
         self.btn_usar.setEnabled(True)
         self.lbl_estado_inf.setText(f"Lista: {nombre}")
         self.lbl_estado_inf.setStyleSheet(
             "color: #01696f; font-size: 13px; font-weight: 600;"
         )
+
 
     def _on_cambiar_imagen(self):
         self._ruta_img = None
@@ -536,11 +613,21 @@ class VistaEscaneo(QWidget):
         self.lbl_estado_inf.setText("Esperando imagen…")
         self.lbl_estado_inf.setStyleSheet("color: #7a7974; font-size: 13px;")
 
+
     def _on_usar_imagen(self):
         if self._ruta_img:
             self.imagen_lista.emit(self._ruta_img)
 
+
     def closeEvent(self, event):
+        # Limpiar archivos temporales de escaneos anteriores al cerrar
+        for f in glob.glob(
+            os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
+        ):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
         if self._worker and self._worker.isRunning():
             self._worker.wait()
         super().closeEvent(event)
