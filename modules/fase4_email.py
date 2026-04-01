@@ -5,22 +5,26 @@ Fase 4 – Enviar el PDF firmado por correo.
 
 Estrategia:
   1. El usuario escribe el destinatario y confirma.
-  2. Se abre el cliente de correo predeterminado del sistema
-     (o el navegador si está asociado) vía protocolo mailto:.
-     - Para: destinatario
-     - Asunto rellenado automáticamente
-     - Cuerpo con el nombre del documento
-  3. El adjunto NO se puede enviar automáticamente por limitación
-     del protocolo mailto:. La app informa la ruta del PDF para
-     que el usuario lo adjunte manualmente dentro del cliente.
+  2. Se crea una carpeta temporal _envio_temp/ dentro de pdfs_firmados/
+     con únicamente una copia del PDF a enviar.
+  3. Se abre esa carpeta en el Explorador (solo ese archivo visible)
+     y simultáneamente se abre el cliente de correo predeterminado
+     con destinatario, asunto y cuerpo prellenados vía mailto:.
+  4. El usuario arrastra el archivo al correo y envía.
+  5. Un hilo daemon borra la carpeta _envio_temp/ después de 30 min.
+     Adicionalmente, la carpeta se limpia automáticamente al iniciar
+     la app (limpiar_temp_al_iniciar).
 
 No requiere pywin32, Outlook ni ningún cliente específico.
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,6 +35,10 @@ from PyQt6.QtWidgets import (
     QLineEdit, QMessageBox, QPushButton, QTextEdit,
     QVBoxLayout,
 )
+
+# ── Constantes ────────────────────────────────────────────────────────────────
+TEMP_FOLDER_NAME  = "_envio_temp"
+TEMP_CLEANUP_SECS = 30 * 60  # 30 minutos
 
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
@@ -107,6 +115,7 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] {{
 }}
 """
 
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 EMAIL_REGEX = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.]{2,}$")
 
@@ -124,14 +133,73 @@ def _construir_resumen(nombre_doc: str, paginas: list) -> str:
     )
 
 
-# ── Lógica mailto: ────────────────────────────────────────────────────────────
+# ── Gestión de carpeta temporal ───────────────────────────────────────────────
+
+def _carpeta_temp(carpeta_firmados: Path) -> Path:
+    return carpeta_firmados / TEMP_FOLDER_NAME
+
+
+def limpiar_temp_al_iniciar(carpeta_firmados: Path) -> None:
+    """
+    Llamaá esto al arrancar la app para limpiar restos de sesiones anteriores.
+    """
+    temp = _carpeta_temp(carpeta_firmados)
+    if temp.exists():
+        try:
+            shutil.rmtree(temp)
+        except Exception:
+            pass
+
+
+def _limpiar_temp_delayed(temp: Path, delay_secs: int) -> None:
+    """Corre en un hilo daemon: espera delay_secs y borra la carpeta temp."""
+    time.sleep(delay_secs)
+    try:
+        if temp.exists():
+            shutil.rmtree(temp)
+    except Exception:
+        pass
+
+
+def _preparar_temp(pdf_origen: Path, carpeta_firmados: Path) -> Path:
+    """
+    Crea _envio_temp/ con solo la copia del PDF y lanza el timer de limpieza.
+    Devuelve la ruta de la copia temporal.
+    """
+    temp = _carpeta_temp(carpeta_firmados)
+    # Limpiar si quedó algo de un envio anterior
+    if temp.exists():
+        shutil.rmtree(temp)
+    temp.mkdir(parents=True, exist_ok=True)
+
+    destino = temp / pdf_origen.name
+    shutil.copy2(pdf_origen, destino)
+
+    # Timer de limpieza automática
+    t = threading.Thread(
+        target=_limpiar_temp_delayed,
+        args=(temp, TEMP_CLEANUP_SECS),
+        daemon=True,
+    )
+    t.start()
+
+    return destino
+
+
+# ── Abrir Explorador y cliente de correo ─────────────────────────────────────
+
+def _abrir_explorador_temp(temp: Path) -> None:
+    """Abre el Explorador de Windows apuntando a la carpeta temporal."""
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", str(temp)])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(temp)])
+    else:
+        subprocess.Popen(["xdg-open", str(temp)])
+
 
 def _abrir_mailto(destinatario: str, asunto: str, cuerpo: str) -> None:
-    """
-    Abre el cliente de correo predeterminado (o navegador asociado)
-    via protocolo mailto:. No puede adjuntar archivos por diseño
-    del protocolo; el adjunto debe hacerse manualmente.
-    """
+    """Abre el cliente de correo predeterminado vía protocolo mailto:."""
     uri = (
         f"mailto:{quote(destinatario)}"
         f"?subject={quote(asunto)}"
@@ -148,12 +216,13 @@ def _abrir_mailto(destinatario: str, asunto: str, cuerpo: str) -> None:
 # ── Diálogo principal ─────────────────────────────────────────────────────────
 class DialogoEnviarEmail(QDialog):
 
-    def __init__(self, pdf_firmado: Path, config: dict,
-                 paginas: list, nombre_doc: str, parent=None):
+    def __init__(self, pdf_firmado: Path, carpeta_firmados: Path,
+                 config: dict, paginas: list, nombre_doc: str, parent=None):
         super().__init__(parent)
-        self.pdf_firmado = pdf_firmado
-        self.paginas     = paginas
-        self.nombre_doc  = nombre_doc
+        self.pdf_firmado      = pdf_firmado
+        self.carpeta_firmados = carpeta_firmados
+        self.paginas          = paginas
+        self.nombre_doc       = nombre_doc
 
         self.setWindowTitle("Enviar documento firmado")
         self.setMinimumWidth(480)
@@ -186,8 +255,8 @@ class DialogoEnviarEmail(QDialog):
         lay.addSpacing(4)
 
         lbl_sub = QLabel(
-            f"Se abrirá tu cliente de correo con el asunto prellenado.<br>"
-            f"Adjuntá <b>{self.pdf_firmado.name}</b> manualmente antes de enviar."
+            f"Se abrirá una carpeta con <b>{self.pdf_firmado.name}</b> listo para adjuntar, "
+            f"y tu cliente de correo con el asunto prellenado."
         )
         lbl_sub.setStyleSheet(f"color: {C_MUTED}; font-size: 12px;")
         lbl_sub.setWordWrap(True)
@@ -226,26 +295,15 @@ class DialogoEnviarEmail(QDialog):
             _construir_resumen(self.nombre_doc, self.paginas)
         )
         lay.addWidget(self.txt_resumen)
-        lay.addSpacing(14)
-
-        # ─ Ruta del PDF para copiar fácilmente
-        lbl_ruta_titulo = QLabel("Ruta del archivo")
-        lbl_ruta_titulo.setStyleSheet("font-weight: 600;")
-        lay.addWidget(lbl_ruta_titulo)
-        lay.addSpacing(6)
-
-        ruta_input = QLineEdit(str(self.pdf_firmado))
-        ruta_input.setReadOnly(True)
-        ruta_input.setToolTip("Copiá esta ruta para adjuntar el archivo en tu cliente de correo")
-        lay.addWidget(ruta_input)
         lay.addSpacing(20)
         lay.addWidget(self._sep())
         lay.addSpacing(14)
 
         # ─ Nota informativa
         lbl_nota = QLabel(
-            "ℹ️  Se abrirá tu cliente de correo predeterminado con el asunto y "
-            "destinatario listos. Adjuntá el archivo usando la ruta de arriba."
+            "ℹ️  Se abrirá una carpeta temporal con solo el archivo a enviar "
+            "y tu cliente de correo. Arrastrá el PDF al correo y envía. "
+            "La carpeta se borra automáticamente en 30 minutos."
         )
         lbl_nota.setStyleSheet(f"font-size: 11px; color: {C_MUTED};")
         lbl_nota.setWordWrap(True)
@@ -264,14 +322,14 @@ class DialogoEnviarEmail(QDialog):
         fila_btns.addWidget(btn_cancelar)
         fila_btns.addStretch()
 
-        self.btn_abrir = QPushButton("✉️  Abrir cliente de correo")
+        self.btn_abrir = QPushButton("✉️  Abrir correo y carpeta")
         self.btn_abrir.setMinimumWidth(200)
         self.btn_abrir.setEnabled(False)
         self.btn_abrir.clicked.connect(self._on_abrir)
         fila_btns.addWidget(self.btn_abrir)
         lay.addLayout(fila_btns)
 
-    # ── Validación ────────────────────────────────────────────────────────
+    # ── Validación ──────────────────────────────────────────────────
     def _on_email_changed(self, texto: str):
         texto = texto.strip()
         if not texto:
@@ -298,6 +356,17 @@ class DialogoEnviarEmail(QDialog):
         self.btn_abrir.setText("Abriendo…")
         self.btn_abrir.setEnabled(False)
 
+        try:
+            copia_temp = _preparar_temp(self.pdf_firmado, self.carpeta_firmados)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error al preparar archivo",
+                f"No se pudo crear la carpeta temporal:\n\n{e}"
+            )
+            self.btn_abrir.setText("✉️  Abrir correo y carpeta")
+            self.btn_abrir.setEnabled(True)
+            return
+
         asunto = f"Documento Firmado: {self.nombre_doc}"
         cuerpo = (
             f"Estimado/a,\n\n"
@@ -306,13 +375,16 @@ class DialogoEnviarEmail(QDialog):
         )
 
         try:
+            # Abrir carpeta temporal (solo el PDF a enviar)
+            _abrir_explorador_temp(copia_temp.parent)
+            # Abrir cliente de correo con destinatario y asunto
             _abrir_mailto(destinatario, asunto, cuerpo)
         except Exception as e:
             QMessageBox.critical(
-                self, "Error al abrir el correo",
-                f"No se pudo abrir el cliente de correo:\n\n{e}"
+                self, "Error al abrir",
+                f"No se pudo abrir el correo o la carpeta:\n\n{e}"
             )
-            self.btn_abrir.setText("✉️  Abrir cliente de correo")
+            self.btn_abrir.setText("✉️  Abrir correo y carpeta")
             self.btn_abrir.setEnabled(True)
             return
 
@@ -322,6 +394,7 @@ class DialogoEnviarEmail(QDialog):
 # ── API pública ───────────────────────────────────────────────────────────────
 def enviar_documento(
     pdf_firmado: Path,
+    carpeta_firmados: Path,
     config: dict,
     paginas: list,
     nombre_doc: str,
@@ -329,6 +402,7 @@ def enviar_documento(
 ) -> None:
     DialogoEnviarEmail(
         pdf_firmado=pdf_firmado,
+        carpeta_firmados=carpeta_firmados,
         config=config,
         paginas=paginas,
         nombre_doc=nombre_doc,
