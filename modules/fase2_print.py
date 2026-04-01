@@ -1,13 +1,8 @@
 # modules/fase2_print.py
-# Estrategia: bypass completo de QPrinter/GDI de Qt.
-# Usamos win32print + win32ui (API nativa de Windows) para enviar
-# el bitmap directamente al spooler, sin ninguna capa Qt en el medio.
-#
-# Flujo:
-#   1. QPrintDialog de Qt para que el usuario elija impresora (solo UI)
-#   2. fitz renderiza la página a RGB
-#   3. PIL convierte a BMP en memoria
-#   4. win32ui/win32print imprime el BMP directo al driver
+# Estrategia: bypass completo de QPrinter/GDI de Qt para render.
+# Usamos win32print + win32ui (API nativa de Windows) solo para elegir
+# impresora y dibujar un DIB estable de 32 bits, evitando CreateBitmap()
+# con memoria RGB cruda que puede fallar con "Select bitmap object failed".
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtWidgets import QMessageBox
@@ -22,8 +17,7 @@ try:
     import win32print
     import win32ui
     import win32con
-    from PIL import Image
-    import io
+    from PIL import Image, ImageWin
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
@@ -47,7 +41,6 @@ class ImpresionPagina:
                 "    pip install pywin32 pillow")
             return False
 
-        # ── 1. Elegir impresora con el diálogo nativo de Qt (solo UI) ───
         printer_qt = QPrinter(QPrinter.PrinterMode.ScreenResolution)
         printer_qt.setColorMode(QPrinter.ColorMode.Color)
         try:
@@ -61,18 +54,17 @@ class ImpresionPagina:
             pass
 
         dialog = QPrintDialog(printer_qt, parent)
-        dialog.setWindowTitle(f"Imprimir \u2014 P\u00e1gina {num_pagina + 1}")
+        dialog.setWindowTitle(f"Imprimir — Página {num_pagina + 1}")
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return False
 
         printer_name = printer_qt.printerName()
 
-        # ── 2. Renderizar con fitz ────────────────────────────────────
         try:
             with fitz.open(ruta_pdf) as doc:
                 pagina = doc[num_pagina]
-                zoom   = PRINT_DPI / 72.0
-                pix    = pagina.get_pixmap(
+                zoom = PRINT_DPI / 72.0
+                pix = pagina.get_pixmap(
                     matrix=fitz.Matrix(zoom, zoom),
                     colorspace=fitz.csRGB,
                     alpha=False,
@@ -82,12 +74,10 @@ class ImpresionPagina:
                 f"No se pudo renderizar la página:\n\n{e}")
             return False
 
-        # ── 3. fitz pixmap -> PIL Image ───────────────────────────────
         pil_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
-        # ── 4. Imprimir con win32print directo ─────────────────────────
         try:
-            ImpresionPagina._win32_print(printer_name, pil_img, PRINT_DPI)
+            ImpresionPagina._win32_print(printer_name, pil_img)
         except Exception as e:
             QMessageBox.critical(parent, "Error de impresión",
                 f"No se pudo imprimir:\n\n{e}")
@@ -96,62 +86,34 @@ class ImpresionPagina:
         return True
 
     @staticmethod
-    def _win32_print(printer_name: str, pil_img: "Image.Image", dpi: int):
-        """Enviar PIL Image a la impresora usando win32ui (DC nativo)."""
-        # Abrir el DC de la impresora
-        hprinter = win32print.OpenPrinter(printer_name)
-        try:
-            printer_info = win32print.GetPrinter(hprinter, 2)
-            devmode = printer_info["pDevMode"]
-        finally:
-            win32print.ClosePrinter(hprinter)
-
-        # Crear Device Context de impresora
+    def _win32_print(printer_name: str, pil_img: "Image.Image"):
         hdc = win32ui.CreateDC()
         hdc.CreatePrinterDC(printer_name)
+        try:
+            pw = hdc.GetDeviceCaps(win32con.HORZRES)
+            ph = hdc.GetDeviceCaps(win32con.VERTRES)
 
-        # Tamaño de la página en píxeles (según el driver)
-        pw = hdc.GetDeviceCaps(win32con.HORZRES)
-        ph = hdc.GetDeviceCaps(win32con.VERTRES)
+            img_w, img_h = pil_img.size
+            scale = min(pw / img_w, ph / img_h)
+            dest_w = max(1, int(img_w * scale))
+            dest_h = max(1, int(img_h * scale))
+            x_off = (pw - dest_w) // 2
+            y_off = (ph - dest_h) // 2
 
-        # Escalar imagen manteniendo proporción
-        img_w, img_h = pil_img.size
-        scale = min(pw / img_w, ph / img_h)
-        dest_w = int(img_w * scale)
-        dest_h = int(img_h * scale)
-        x_off  = (pw - dest_w) // 2
-        y_off  = (ph - dest_h) // 2
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            pil_resized = pil_img.resize((dest_w, dest_h), Image.LANCZOS)
 
-        # Redimensionar con Pillow (Lanczos = máxima calidad)
-        pil_resized = pil_img.resize((dest_w, dest_h), Image.LANCZOS)
+            dib = ImageWin.Dib(pil_resized)
 
-        # Convertir a BMP en memoria
-        bmp_io = io.BytesIO()
-        pil_resized.save(bmp_io, format="BMP")
-        bmp_bytes = bmp_io.getvalue()
-
-        # Crear HBITMAP desde los bytes
-        import ctypes
-        hbitmap = ctypes.windll.gdi32.CreateBitmap(
-            dest_w, dest_h, 1, 24,
-            ctypes.c_char_p(bytes(pil_resized.tobytes()))
-        )
-
-        # Iniciar documento
-        hdc.StartDoc("PDF Print")
-        hdc.StartPage()
-
-        # Crear memory DC y seleccionar bitmap
-        mdc = hdc.CreateCompatibleDC()
-        mdc.SelectObject(win32ui.CreateBitmapFromHandle(hbitmap))
-
-        # BitBlt: copiar del memory DC al printer DC
-        hdc.BitBlt(
-            (x_off, y_off), (dest_w, dest_h),
-            mdc, (0, 0),
-            win32con.SRCCOPY
-        )
-
-        hdc.EndPage()
-        hdc.EndDoc()
-        hdc.DeleteDC()
+            hdc.StartDoc("PDF Print")
+            try:
+                hdc.StartPage()
+                try:
+                    dib.draw(hdc.GetHandleOutput(), (x_off, y_off, x_off + dest_w, y_off + dest_h))
+                finally:
+                    hdc.EndPage()
+            finally:
+                hdc.EndDoc()
+        finally:
+            hdc.DeleteDC()
