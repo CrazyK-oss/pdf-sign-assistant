@@ -8,3 +8,4 @@ pywin32
 reportlab
 python-dotenv
 pyinstaller
+exchangelib
