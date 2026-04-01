@@ -52,8 +52,15 @@ CONFIG_PATH     = BASE_DIR / "config.json"
 CARPETA_TRABAJO.mkdir(exist_ok=True)
 CARPETA_FIRMADO.mkdir(exist_ok=True)
 
+# Limpiar carpeta temporal de envíos anteriores al iniciar
+try:
+    from modules.fase4_email import limpiar_temp_al_iniciar
+    limpiar_temp_al_iniciar(CARPETA_FIRMADO)
+except Exception:
+    pass
 
-# ── Utilidades UI ───────────────────────────────────────────────────────────────
+
+# ── Utilidades UI ───────────────────────────────────────────────────────────────────
 
 def _cargar_config() -> dict:
     if CONFIG_PATH.exists():
@@ -89,7 +96,7 @@ def _sep() -> QFrame:
     return s
 
 
-# ── Panel PDF activo ─────────────────────────────────────────────────────────────
+# ── Panel PDF activo ──────────────────────────────────────────────────────────────────
 
 class PanelActivo(QFrame):
     def __init__(self, ruta: Path, on_trabajar, on_cancelar, parent=None):
@@ -140,14 +147,14 @@ class PanelActivo(QFrame):
         fila_btns.addWidget(btn_trabajar)
         fila_btns.addStretch()
 
-        btn_cancelar = _btn("✕  Cancelar", danger=True, height=42)
+        btn_cancelar = _btn("✕  Cancelar", danger=True, height=42)
         btn_cancelar.clicked.connect(on_cancelar)
         fila_btns.addWidget(btn_cancelar)
 
         lay.addLayout(fila_btns)
 
 
-# ── Item de guardados ────────────────────────────────────────────────────────────
+# ── Item de guardados ──────────────────────────────────────────────────────────────────
 
 class ItemGuardado(QListWidgetItem):
     def __init__(self, ruta: Path):
@@ -163,7 +170,7 @@ class ItemGuardado(QListWidgetItem):
         self.setToolTip(str(ruta))
 
 
-# ── Ventana principal ────────────────────────────────────────────────────────────
+# ── Ventana principal ──────────────────────────────────────────────────────────────────
 
 class VentanaPrincipal(QMainWindow):
     def __init__(self):
@@ -179,7 +186,7 @@ class VentanaPrincipal(QMainWindow):
         self._build_ui()
         self._cargar_guardados_existentes()
 
-    # ── Construcción de UI ───────────────────────────────────────────────────────
+    # ── Construcción de UI ──────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         central = QWidget()
@@ -213,12 +220,12 @@ class VentanaPrincipal(QMainWindow):
         # Ajustes ⚙
         self.btn_ajustes = _btn("⚙", ghost=True, height=40)
         self.btn_ajustes.setFixedWidth(44)
-        self.btn_ajustes.setToolTip("Ajustes — configurar correo emisor")
+        self.btn_ajustes.setToolTip("Ajustes")
         self.btn_ajustes.clicked.connect(self._abrir_ajustes)
         header.addWidget(self.btn_ajustes)
 
         # Abrir PDF
-        self.btn_abrir = _btn("＋  Abrir PDF", min_w=150, height=40)
+        self.btn_abrir = _btn("＋  Abrir PDF", min_w=150, height=40)
         self.btn_abrir.clicked.connect(self.abrir_pdf)
         header.addWidget(self.btn_abrir)
 
@@ -298,12 +305,12 @@ class VentanaPrincipal(QMainWindow):
         fila_acc = QHBoxLayout()
         fila_acc.setSpacing(8)
 
-        self.btn_reabrir = _btn("✏️  Editar seleccionado", secondary=True, height=36)
+        self.btn_reabrir = _btn("✏️  Editar seleccionado", secondary=True, height=36)
         self.btn_reabrir.clicked.connect(self._reabrir_desde_boton)
         self.btn_reabrir.setEnabled(False)
         fila_acc.addWidget(self.btn_reabrir)
 
-        self.btn_email = _btn("✉️  Enviar por correo", secondary=True, height=36)
+        self.btn_email = _btn("✉️  Enviar por correo", secondary=True, height=36)
         self.btn_email.clicked.connect(self._enviar_correo)
         self.btn_email.setEnabled(False)
         fila_acc.addWidget(self.btn_email)
@@ -311,7 +318,7 @@ class VentanaPrincipal(QMainWindow):
         fila_acc.addStretch()
 
         # ─ Botón abrir carpeta de firmados
-        self.btn_carpeta = _btn("📂  Abrir carpeta", ghost=True, height=36)
+        self.btn_carpeta = _btn("📂  Abrir carpeta", ghost=True, height=36)
         self.btn_carpeta.setToolTip(str(CARPETA_FIRMADO))
         self.btn_carpeta.clicked.connect(self._abrir_carpeta_firmados)
         fila_acc.addWidget(self.btn_carpeta)
@@ -323,7 +330,7 @@ class VentanaPrincipal(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage("Listo — abrí un PDF para comenzar.")
 
-    # ── Toggle tema ───────────────────────────────────────────────────────────
+    # ── Toggle tema ──────────────────────────────────────────────────────────────────
 
     def _toggle_tema(self):
         nuevo = "dark" if current_mode() == "light" else "light"
@@ -337,7 +344,7 @@ class VentanaPrincipal(QMainWindow):
             f"Tema {'oscuro' if nuevo == 'dark' else 'claro'} activado."
         )
 
-    # ── Estado vacío / lista ──────────────────────────────────────────────────────
+    # ── Estado vacío / lista ─────────────────────────────────────────────────────────────────
 
     def _actualizar_estado_vacio(self):
         count = self.lista_guardados.count()
@@ -361,7 +368,7 @@ class VentanaPrincipal(QMainWindow):
             self.lista_guardados.scrollToItem(item)
         self._actualizar_estado_vacio()
 
-    # ── Selección ───────────────────────────────────────────────────────────────
+    # ── Selección ─────────────────────────────────────────────────────────────────────
 
     def _on_seleccion_guardado(self):
         tiene = bool(self.lista_guardados.selectedItems())
@@ -372,7 +379,7 @@ class VentanaPrincipal(QMainWindow):
         items = self.lista_guardados.selectedItems()
         return items[0] if items else None
 
-    # ── Ajustes ───────────────────────────────────────────────────────────────────
+    # ── Ajustes ────────────────────────────────────────────────────────────────────────
 
     def _abrir_ajustes(self):
         from modules.settings import DialogoAjustes
@@ -383,7 +390,7 @@ class VentanaPrincipal(QMainWindow):
                 f"Ajustes guardados — correo: {self.config.get('email_user', '')}"
             )
 
-    # ── Abrir PDF ──────────────────────────────────────────────────────────────────
+    # ── Abrir PDF ────────────────────────────────────────────────────────────────────────
 
     def abrir_pdf(self):
         if self._pdf_activo is not None:
@@ -428,7 +435,7 @@ class VentanaPrincipal(QMainWindow):
         self._sep_panel.setVisible(True)
         self.btn_abrir.setEnabled(False)
 
-    # ── Cancelar trabajo ──────────────────────────────────────────────────────────
+    # ── Cancelar trabajo ──────────────────────────────────────────────────────────────────
 
     def _cancelar_trabajo(self):
         if self._pdf_activo is None:
@@ -469,7 +476,7 @@ class VentanaPrincipal(QMainWindow):
                 v.deleteLater()
                 setattr(self, attr, None)
 
-    # ── Flujo de trabajo ──────────────────────────────────────────────────────────
+    # ── Flujo de trabajo ─────────────────────────────────────────────────────────────────
 
     def _iniciar_flujo_trabajo(self):
         if self._pdf_activo is None:
@@ -550,7 +557,7 @@ class VentanaPrincipal(QMainWindow):
         nombre = Path(ruta_final).name
         self._desactivar_panel()
         self._agregar_item_guardado(Path(ruta_final))
-        self.status.showMessage(f"✅  Guardado: {nombre}")
+        self.status.showMessage(f"✅  Guardado: {nombre}")
         QMessageBox.information(self, "¡Listo!", f"Documento guardado:\n{ruta_final}")
 
     def _on_guardar_cancelado(self):
@@ -574,7 +581,7 @@ class VentanaPrincipal(QMainWindow):
             self._vista_preview = None
         self.status.showMessage("Vista de páginas cerrada.")
 
-    # ── Re-abrir guardado ─────────────────────────────────────────────────────────
+    # ── Re-abrir guardado ──────────────────────────────────────────────────────────────────
 
     def _reabrir_desde_boton(self):
         item = self._item_seleccionado()
@@ -602,7 +609,7 @@ class VentanaPrincipal(QMainWindow):
         self._activar_pdf(copia)
         self.status.showMessage(f"Re-editando: {ruta.name}")
 
-    # ── Enviar correo ───────────────────────────────────────────────────────────────
+    # ── Enviar correo ──────────────────────────────────────────────────────────────────────
 
     def _enviar_correo(self):
         item = self._item_seleccionado()
@@ -618,12 +625,15 @@ class VentanaPrincipal(QMainWindow):
             QMessageBox.critical(self, "Error de módulo", str(e))
             return
         enviar_documento(
-            pdf_firmado=item.ruta, config=self.config,
-            paginas=[0], nombre_doc=item.ruta.stem,
+            pdf_firmado=item.ruta,
+            carpeta_firmados=CARPETA_FIRMADO,
+            config=self.config,
+            paginas=[0],
+            nombre_doc=item.ruta.stem,
         )
         self.status.showMessage(f"Flujo de envío iniciado: {item.ruta.name}")
 
-    # ── Abrir carpeta de firmados ──────────────────────────────────────────────────
+    # ── Abrir carpeta de firmados ────────────────────────────────────────────────────────
 
     def _abrir_carpeta_firmados(self):
         ruta = CARPETA_FIRMADO
@@ -639,7 +649,7 @@ class VentanaPrincipal(QMainWindow):
         self.status.showMessage(f"Carpeta abierta: {ruta}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────────
+# ── Entry point ──────────────────────────────────────────────────────────────────────────
 
 def main():
     app = QApplication(sys.argv)
