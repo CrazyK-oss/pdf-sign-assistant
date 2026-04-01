@@ -1,19 +1,23 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
 #
-# Código original restaurado (QPrintDialog nativo + drawImage).
+# DIAGNÓSTICO FINAL CONFIRMADO:
+#   - El PDF tiene R=0 G=0 B=0 para el texto negro. fitz lo renderiza
+#     perfecto. El morado lo genera el driver HP Smart Tank al procesar
+#     el bitmap por GDI con ICM activado.
 #
-# POR QUÉ EL MORADO APARECIÓ:
-#   El commit d9b35e8 quitó el cap de DPI para "máxima calidad".
-#   A DPI >= 600 el driver HP Smart Tank activa su pipeline ICM
-#   (Image Color Management) para modo foto, que aplica el perfil
-#   ICC del dispositivo y desplaza los colores -> morado/café.
-#   A DPI <= 300 el driver usa el pipeline de documentos simple,
-#   sin gestión de color => colores exactos.
+#   - min(printer.resolution(), 300) NO funciona porque resolution()
+#     es solo lectura después del diálogo; Qt usa el valor del driver
+#     (600 DPI) para el viewport interno aunque nosotros rend. a 300.
+#     Resultado: GDI escala la imagen de 300 a 600 DPI internamente
+#     y el pipeline ICM se sigue activando.
 #
-# SOLUCIÓN: cap de DPI en 300. La diferencia visual en documentos
-# de texto y PDF firmados es imperceptible frente a 600 DPI, pero
-# evita por completo el problema de color.
+# SOLUCIÓN DEFINITIVA:
+#   printer.setResolution(150) ANTES de QPrintDialog.
+#   Esto le dice a Qt que negocie 150 DPI con el driver, de forma que
+#   el viewport interno de QPainter queda a 150 DPI y GDI no activa
+#   su pipeline de alta resolución / ICM.
+#   150 DPI es más que suficiente para documentos de texto/firmas.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage
@@ -25,6 +29,10 @@ try:
     PYMUPDF_OK = True
 except ImportError:
     PYMUPDF_OK = False
+
+# DPI fijo para impresión. 150 evita el pipeline ICM del driver HP.
+# Calidad: A4 a 150 DPI = 1240x1754 px, perfecta para texto y firmas.
+PRINT_DPI = 150
 
 
 class ImpresionPagina:
@@ -41,8 +49,14 @@ class ImpresionPagina:
             )
             return False
 
-        # ── 1. Configurar QPrinter ──────────────────────────────────────
+        # ── 1. Configurar QPrinter con DPI fijo ANTES del diálogo ──────────
+        #
+        # setResolution() debe llamarse ANTES de QPrintDialog para que
+        # Qt negocie ese DPI con el driver desde el inicio.
+        # Si se llama después, el driver ya fijó su DPI interno (600)
+        # y el setResolution queda ignorado.
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setResolution(PRINT_DPI)
         printer.setColorMode(QPrinter.ColorMode.Color)
         printer.setFullPage(True)
 
@@ -62,21 +76,12 @@ class ImpresionPagina:
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return False
 
-        # ── 3. Renderizar ──────────────────────────────────────────────
-        #
-        # DPI CAP = 300.
-        # Por encima de 300 DPI el driver HP activa ICM (modo foto)
-        # y aplica su perfil de color ICC => resultado morado/café.
-        # 300 DPI es más que suficiente para documentos y PDFs firmados.
-        dpi = min(printer.resolution(), 300)
-        if dpi <= 0:
-            dpi = 300
-
+        # ── 3. Renderizar al DPI fijo ───────────────────────────────────
         doc = None
         try:
             doc    = fitz.open(ruta_pdf)
             pagina = doc[num_pagina]
-            zoom   = dpi / 72.0
+            zoom   = PRINT_DPI / 72.0
             pix    = pagina.get_pixmap(
                 matrix=fitz.Matrix(zoom, zoom),
                 colorspace=fitz.csRGB,
@@ -93,7 +98,7 @@ class ImpresionPagina:
             if doc:
                 doc.close()
 
-        # ── 4. fitz pixmap → QImage ───────────────────────────────────
+        # ── 4. fitz pixmap → QImage RGB888 ─────────────────────────────
         img = QImage(
             bytes(pix.samples),
             pix.width,
@@ -101,8 +106,8 @@ class ImpresionPagina:
             pix.stride,
             QImage.Format.Format_RGB888,
         )
-        img.setDotsPerMeterX(int(dpi / 0.0254))
-        img.setDotsPerMeterY(int(dpi / 0.0254))
+        img.setDotsPerMeterX(int(PRINT_DPI / 0.0254))
+        img.setDotsPerMeterY(int(PRINT_DPI / 0.0254))
 
         # ── 5. Pintar ──────────────────────────────────────────────────
         painter = QPainter()
