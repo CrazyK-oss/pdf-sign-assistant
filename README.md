@@ -19,7 +19,7 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 - 🖼️ **Integración con escáner** — cargá o capturá la imagen escaneada de la página firmada
 - 🔄 **Reemplazo de página** — incrusta la firma escaneada de vuelta en el PDF original
 - 💾 **Lista de trabajos guardados** — historial de documentos procesados con fecha y hora; permite re-editar
-- ✉️ **Envío por correo SMTP** — enviá documentos firmados directamente desde la app
+- ✉️ **Envío por correo** — abre tu cliente de correo con destinatario/asunto listos y una carpeta temporal con el PDF adjuntable
 - ⚙️ **Panel de ajustes** — configurá el correo emisor (servidor, puerto, credenciales) desde la UI, sin tocar archivos de configuración
 - 🌙 **Modo claro y oscuro** — alternás con un clic; el tema se aplica a toda la interfaz en tiempo real
 - 🔒 **Cancelación segura** — cancelá en cualquier etapa sin corromper el archivo original
@@ -29,7 +29,7 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 ## Flujo de trabajo
 
 ```
-Abrir PDF  →  Vista previa  →  Imprimir página  →  Escanear página firmada  →  Guardar PDF
+Abrir PDF  →  Vista previa  →  Imprimir página  →  Escanear página firmada  →  Guardar PDF  →  Enviar
 ```
 
 | Paso | Módulo | Descripción |
@@ -39,7 +39,7 @@ Abrir PDF  →  Vista previa  →  Imprimir página  →  Escanear página firma
 | 3 | `fase2_print.py` | Envío de la página seleccionada a la impresora del sistema |
 | 4 | `fase3_scan.py` | Carga de la imagen escaneada/fotografiada de la página firmada |
 | 5 | `fase_guardar.py` | Vista previa del resultado, confirmación y guardado del PDF firmado |
-| 6 | `fase4_email.py` | Envío del PDF firmado por correo SMTP con adjunto |
+| 6 | `fase4_email.py` | Flujo de envío: carpeta temporal + apertura del cliente de correo |
 
 ---
 
@@ -54,6 +54,7 @@ pdf-sign-assistant/
 ├── pdf_sign_assistant.spec  # Configuración de PyInstaller para generar el .exe
 ├── pdfs_trabajo/            # Copias de trabajo temporales (auto-creado, gitignored)
 ├── pdfs_firmados/           # Documentos firmados finales (auto-creado, gitignored)
+│   └── _envio_temp/         # Carpeta temporal para adjuntar en correos (se borra a los 30 min)
 └── modules/
     ├── __init__.py
     ├── setup.py             # Inicialización y rutas compatibles con PyInstaller
@@ -63,8 +64,23 @@ pdf-sign-assistant/
     ├── fase2_print.py       # Integración con la impresora del sistema
     ├── fase3_scan.py        # Carga de imagen y vista previa del escaneo
     ├── fase_guardar.py      # Lógica de reemplazo de página y guardado del PDF
-    └── fase4_email.py       # Envío por correo SMTP con adjunto PDF
+    └── fase4_email.py       # Flujo de envío: carpeta temporal + cliente de correo
 ```
+
+---
+
+## Flujo de envío por correo
+
+El envío **no usa SMTP directo** — en cambio abre tu cliente de correo habitual (Outlook, Gmail, Thunderbird, etc.) con los datos ya cargados, y te muestra el PDF listo para arrastrar al adjunto.
+
+1. Seleccioná un documento firmado en la lista y pulsá **✉️ Enviar por correo**
+2. Completá el destinatario y el asunto en el diálogo
+3. Pulsá **✉️ Abrir correo y carpeta** — se abren simultáneamente:
+   - El **Explorador de archivos** mostrando `pdfs_firmados/_envio_temp/` con solo ese PDF
+   - Tu **cliente de correo** (o navegador) con destinatario y asunto ya listos
+4. Arrastrá el PDF al correo y enviá normalmente
+
+La carpeta `_envio_temp/` se limpia automáticamente a los **30 minutos**. Si cerrás y reabrís la app antes, también se limpia al inicio.
 
 ---
 
@@ -170,7 +186,13 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 
 ## Changelog
 
-### v0.4 — Rediseño UI/UX + Modo Oscuro *(actual)*
+### v0.5 — Flujo de envío con carpeta temporal *(actual)*
+- **Nuevo flujo de envío** (`fase4_email.py`): copia el PDF a `pdfs_firmados/_envio_temp/` y abre el cliente de correo y el Explorador simultáneamente
+- **Limpieza automática** de `_envio_temp/` a los 30 minutos vía hilo daemon
+- **Limpieza al inicio** de la app: si quedó una carpeta temporal de una sesión anterior, se elimina antes de mostrar la ventana
+- **Fix crítico impresión** (`fase2_print.py`): reemplazado el flujo `CreateBitmap/SelectObject` por `ImageWin.Dib.draw()` para eliminar el error `Select bitmap object failed`
+
+### v0.4 — Rediseño UI/UX + Modo Oscuro
 - **Sistema de diseño unificado** (`modules/theme.py`) con paletas `LIGHT` y `DARK` y stylesheet centralizado
 - **Toggle claro/oscuro** en el header — se aplica a toda la interfaz en tiempo real
 - **Fix crítico:** eliminado `QFormLayout.removeRow()` en `settings.py` que causaba crash al abrir el diálogo de ajustes
@@ -213,5 +235,6 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 - Solo puede haber **un PDF en proceso** a la vez; el botón "Abrir PDF" se deshabilita hasta que la sesión actual se cierre o complete.
 - Las copias de trabajo se guardan en `pdfs_trabajo/` y se limpian automáticamente al guardar o cancelar.
 - Los documentos firmados se persisten en `pdfs_firmados/` y aparecen en la ventana principal con su fecha de modificación.
+- La carpeta `pdfs_firmados/_envio_temp/` es estrictamente temporal — no guardes archivos importantes ahí.
 - Hacer doble clic en un documento guardado lo reabre para re-editar sin modificar el original.
 - Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.
