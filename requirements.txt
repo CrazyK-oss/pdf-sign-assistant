@@ -6,3 +6,5 @@ pypdf
 watchdog
 pywin32
 reportlab
+python-dotenv
+pyinstaller
