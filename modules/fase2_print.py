@@ -1,16 +1,23 @@
 # modules/fase2_print.py
-# ROOT CAUSE CONFIRMADO:
-#   debug_fitz_output.png  -> normal  (fitz OK)
-#   debug_qt_argb32.png    -> normal  (QImage OK)
-#   impreso               -> morado  (QPainter->printer hace otra conversión interna)
+# ROOT CAUSE DEFINITIVO (confirmado con test de bloques de color):
 #
-# Qt en Windows, al llamar painter.drawImage() sobre un QPrinter,
-# pasa la QImage por un QPixmap intermedio interno para el backend
-# GDI, y esa conversión interna vuelve a intercambiar canales.
+#   Resultado del test minimal:
+#     Negro  (0,0,0)   -> negro    OK
+#     Rojo   (255,0,0) -> rosa     ROTO
+#     Verde  (0,255,0) -> blanco   ROTO
+#     Azul   (0,0,255) -> morado   ROTO
 #
-# SOLUCIÓN: convertir a QPixmap EXPLICITAMENTE nosotros antes de
-# dibujar, y usar drawPixmap(). QPixmap es el formato nativo del
-# display engine de Qt en Windows => cero conversiones intermedias.
+#   Esto NO es un intercambio R<->B.
+#   El canal R se filtra en todos los canales.
+#   Patrón exacto de conversión RGB->CMYK mal aplicada:
+#     el driver HP recibe los datos y los interpreta como CMYK
+#     porque QPrinter.PrinterMode.HighResolution activa el pipeline
+#     de alta calidad del driver, que en la HP Smart Tank 530
+#     trabaja en espacio CMYK internamente.
+#
+# SOLUCIÓN:
+#   QPrinter.PrinterMode.ScreenResolution mantiene el pipeline RGB
+#   directo sin conversion CMYK. El driver recibe los datos tal cual.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage, QPixmap
@@ -41,7 +48,11 @@ class ImpresionPagina:
             return False
 
         # ── 1. Configurar QPrinter ──────────────────────────────────────
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        #
+        # ScreenResolution = pipeline RGB directo al driver.
+        # HighResolution   = pipeline CMYK de alta calidad (rompe colores
+        #                    en la HP Smart Tank 530).
+        printer = QPrinter(QPrinter.PrinterMode.ScreenResolution)
         printer.setResolution(PRINT_DPI)
         printer.setColorMode(QPrinter.ColorMode.Color)
         printer.setFullPage(True)
@@ -85,11 +96,6 @@ class ImpresionPagina:
                 doc.close()
 
         # ── 4. fitz -> QImage -> QPixmap ─────────────────────────────────
-        #
-        # QPixmap es el formato nativo del display engine de Qt/Windows.
-        # drawPixmap() sobre QPrinter no hace conversiones intermedias.
-        # drawImage() sí las hace (pasa por un pixmap interno de GDI
-        # que vuelve a intercambiar canales R<->B => morado).
         img_rgb = QImage(
             bytes(pix.samples),
             pix.width,
@@ -99,7 +105,7 @@ class ImpresionPagina:
         )
         pixmap = QPixmap.fromImage(img_rgb)
 
-        # ── 5. Pintar con drawPixmap ────────────────────────────────────
+        # ── 5. Pintar ──────────────────────────────────────────────────
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.critical(
