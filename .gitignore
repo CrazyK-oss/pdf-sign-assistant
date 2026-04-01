@@ -11,3 +11,5 @@ venv/
 /scans/
 /temp/
 *.pdf
+/build/
+/dist/
