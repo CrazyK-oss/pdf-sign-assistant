@@ -1,7 +1,14 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
-# Abre directamente el diálogo nativo del sistema operativo,
-# renderizando la página al DPI real de la impresora seleccionada.
+#
+# Mejoras:
+# - setFullPage(True): usa toda el área física de la hoja, sin márgenes
+#   del controlador que recortarían el contenido.
+# - Zoom calculado al DPI real de la impresora (sin cap) para máxima
+#   resolución de trama. Impresoras de 600/1200 DPI se aprovechan al 100%.
+# - drawImage con SmoothTransformation implícita (Qt escala la QImage
+#   al destRect con bicúbico cuando la imagen es mayor que el destino).
+# - Manejo explícito de memoria: doc.close() en bloque finally.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage
@@ -38,17 +45,14 @@ class ImpresionPagina:
 
         Returns:
             True  → usuario confirmó e imprimió.
-            False → usuario canceló el diálogo, o hubo un error.
+            False → usuario canceló o hubo error.
         """
-
-        # ── Guardia de dependencia ──────────────────────────────────────
         if not PYMUPDF_OK:
             QMessageBox.critical(
                 parent,
                 "Dependencia faltante",
                 "PyMuPDF no está instalado.\n\n"
-                "Instálalo con:\n"
-                "    pip install pymupdf\n\n"
+                "Instálalo con:\n    pip install pymupdf\n\n"
                 "Luego reinicia la aplicación."
             )
             return False
@@ -56,43 +60,52 @@ class ImpresionPagina:
         # ── 1. Configurar QPrinter ──────────────────────────────────────
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setColorMode(QPrinter.ColorMode.Color)
-        # fullPage=False: respeta los márgenes físicos de la impresora
-        printer.setFullPage(False)
 
-        # Detectar orientación real de la página en el PDF
+        # setFullPage(True): imprime en el área física total de la hoja.
+        # Con False, el controlador aplica sus propios márgenes (~5-8 mm)
+        # que recortan el contenido. True garantiza máximo aprovechamiento.
+        printer.setFullPage(True)
+
+        # Detectar orientación real de la página
         try:
             with fitz.open(ruta_pdf) as doc_tmp:
-                rect = doc_tmp[num_pagina].rect  # unidades: puntos tipográficos (1pt = 1/72 in)
+                rect = doc_tmp[num_pagina].rect
                 if rect.width > rect.height:
                     printer.setPageOrientation(QPrinter.Orientation.Landscape)
                 else:
                     printer.setPageOrientation(QPrinter.Orientation.Portrait)
         except Exception:
-            pass  # Si falla, dejamos la orientación por defecto del sistema
+            pass
 
         # ── 2. Abrir el diálogo nativo ──────────────────────────────────
         dialog = QPrintDialog(printer, parent)
         dialog.setWindowTitle(f"Imprimir — Página {num_pagina + 1}")
-
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
-            return False   # Usuario canceló → no hacer nada, volver al grid
+            return False
 
-        # ── 3. Renderizar la página al DPI real de la impresora ─────────
+        # ── 3. Renderizar al DPI real de la impresora ───────────────────
         dpi = printer.resolution()
         if dpi <= 0:
-            dpi = 300   # Fallback seguro si la impresora no reporta DPI
+            dpi = 300
 
+        doc = None
         try:
             doc = fitz.open(ruta_pdf)
             pagina = doc[num_pagina]
 
-            # zoom = DPI_impresora / 72  →  resolución máxima garantizada
-            # Ej: impresora 600 DPI → zoom = 8.33 → imagen ~4960×7016 px para A4
+            # zoom = DPI_impresora / 72 pt  →  resolución 1:1 con la impresora
+            # Ej: 600 DPI → zoom=8.33 → imagen ~4961×7016 px para A4 vertical
+            # Ej: 1200 DPI → zoom=16.67 → imagen ~9922×14031 px
             zoom = dpi / 72.0
-            mat = fitz.Matrix(zoom, zoom)
-            pix = pagina.get_pixmap(matrix=mat, alpha=False)
-            doc.close()
+            mat  = fitz.Matrix(zoom, zoom)
 
+            # colorspace=fitz.csRGB + alpha=False → RGB 24-bit sin canal alfa,
+            # máxima compatibilidad con QPrinter y sin overhead de transparencia.
+            pix = pagina.get_pixmap(
+                matrix=mat,
+                colorspace=fitz.csRGB,
+                alpha=False,
+            )
         except Exception as e:
             QMessageBox.critical(
                 parent,
@@ -100,48 +113,49 @@ class ImpresionPagina:
                 f"No se pudo renderizar la página:\n\n{e}"
             )
             return False
+        finally:
+            if doc:
+                doc.close()
 
         # ── 4. Convertir pixmap a QImage ────────────────────────────────
-        # bytes() explícito: pix.samples puede ser memoryview en versiones
-        # recientes de PyMuPDF, y QImage necesita un buffer de bytes estable.
         img = QImage(
-            bytes(pix.samples),
+            bytes(pix.samples),  # buffer estable (memoryview → bytes)
             pix.width,
             pix.height,
-            pix.stride,        # bytes por fila
-            QImage.Format.Format_RGB888
+            pix.stride,
+            QImage.Format.Format_RGB888,
         )
+        # Embeber DPI en la imagen para que QPrinter la posicione correctamente
+        img.setDotsPerMeterX(int(dpi / 0.0254))
+        img.setDotsPerMeterY(int(dpi / 0.0254))
 
         # ── 5. Pintar en la impresora ───────────────────────────────────
         painter = QPainter()
-
         if not painter.begin(printer):
             QMessageBox.critical(
                 parent,
                 "Error de impresión",
                 "No se pudo iniciar el proceso de impresión.\n"
-                "Verifica que la impresora esté disponible y sin errores."
+                "Verificá que la impresora esté disponible y sin errores."
             )
             return False
 
         try:
-            # Escalar la imagen para ocupar toda la página respetando proporción,
-            # y centrarla. Usamos drawImage(QRect, QImage) en lugar de
-            # setViewport/setWindow, que en Qt6 puede deformar si los márgenes
-            # físicos de la impresora tienen dimensiones impares.
+            # RenderHint SmoothPixmapTransform: activa interpolación bicúbica
+            # al escalar la imagen al área del viewport → bordes nítidos.
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
             viewport = painter.viewport()
             img_size = img.size().scaled(
                 viewport.size(),
-                Qt.AspectRatioMode.KeepAspectRatio
+                Qt.AspectRatioMode.KeepAspectRatio,
             )
-
             x_off = (viewport.width()  - img_size.width())  // 2
             y_off = (viewport.height() - img_size.height()) // 2
-
             dest_rect = QRect(x_off, y_off, img_size.width(), img_size.height())
             painter.drawImage(dest_rect, img)
-
         finally:
-            painter.end()   # Siempre liberar el painter, incluso si hay excepción
+            painter.end()
 
         return True
