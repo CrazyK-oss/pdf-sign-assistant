@@ -11,9 +11,9 @@ Estrategia:
      y simultáneamente se abre el cliente de correo predeterminado
      con destinatario, asunto y cuerpo prellenados vía mailto:.
   4. El usuario arrastra el archivo al correo y envía.
-  5. Un hilo daemon borra la carpeta _envio_temp/ después de 30 min.
-     Adicionalmente, la carpeta se limpia automáticamente al iniciar
-     la app (limpiar_temp_al_iniciar).
+  5. La carpeta _envio_temp/ se borra al cerrar la app (closeEvent en main.py).
+     Adicionalmente se limpia al arrancar (limpiar_temp_al_iniciar) por si
+     la sesión anterior terminó abruptamente.
 
 No requiere pywin32, Outlook ni ningún cliente específico.
 """
@@ -23,12 +23,9 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog, QFrame, QHBoxLayout, QLabel,
@@ -37,8 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 # ── Constantes ────────────────────────────────────────────────────────────────
-TEMP_FOLDER_NAME  = "_envio_temp"
-TEMP_CLEANUP_SECS = 30 * 60  # 30 minutos
+TEMP_FOLDER_NAME = "_envio_temp"
 
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
@@ -139,10 +135,8 @@ def _carpeta_temp(carpeta_firmados: Path) -> Path:
     return carpeta_firmados / TEMP_FOLDER_NAME
 
 
-def limpiar_temp_al_iniciar(carpeta_firmados: Path) -> None:
-    """
-    Llamaá esto al arrancar la app para limpiar restos de sesiones anteriores.
-    """
+def _borrar_temp(carpeta_firmados: Path) -> None:
+    """Borra _envio_temp/ si existe. Silencia cualquier error."""
     temp = _carpeta_temp(carpeta_firmados)
     if temp.exists():
         try:
@@ -151,45 +145,36 @@ def limpiar_temp_al_iniciar(carpeta_firmados: Path) -> None:
             pass
 
 
-def _limpiar_temp_delayed(temp: Path, delay_secs: int) -> None:
-    """Corre en un hilo daemon: espera delay_secs y borra la carpeta temp."""
-    time.sleep(delay_secs)
-    try:
-        if temp.exists():
-            shutil.rmtree(temp)
-    except Exception:
-        pass
+def limpiar_temp_al_iniciar(carpeta_firmados: Path) -> None:
+    """Llamá al arrancar la app: limpia restos de sesiones anteriores."""
+    _borrar_temp(carpeta_firmados)
+
+
+def limpiar_temp_al_salir(carpeta_firmados: Path) -> None:
+    """Llamá al cerrar la app (closeEvent/aboutToQuit)."""
+    _borrar_temp(carpeta_firmados)
 
 
 def _preparar_temp(pdf_origen: Path, carpeta_firmados: Path) -> Path:
     """
-    Crea _envio_temp/ con solo la copia del PDF y lanza el timer de limpieza.
+    Crea _envio_temp/ con solo la copia del PDF.
     Devuelve la ruta de la copia temporal.
+    La limpieza la gestiona limpiar_temp_al_salir(), no un timer.
     """
     temp = _carpeta_temp(carpeta_firmados)
-    # Limpiar si quedó algo de un envio anterior
     if temp.exists():
         shutil.rmtree(temp)
     temp.mkdir(parents=True, exist_ok=True)
 
     destino = temp / pdf_origen.name
     shutil.copy2(pdf_origen, destino)
-
-    # Timer de limpieza automática
-    t = threading.Thread(
-        target=_limpiar_temp_delayed,
-        args=(temp, TEMP_CLEANUP_SECS),
-        daemon=True,
-    )
-    t.start()
-
     return destino
 
 
 # ── Abrir Explorador y cliente de correo ─────────────────────────────────────
 
 def _abrir_explorador_temp(temp: Path) -> None:
-    """Abre el Explorador de Windows apuntando a la carpeta temporal."""
+    """Abre el Explorador apuntando a la carpeta temporal."""
     if sys.platform == "win32":
         subprocess.Popen(["explorer", str(temp)])
     elif sys.platform == "darwin":
@@ -199,7 +184,7 @@ def _abrir_explorador_temp(temp: Path) -> None:
 
 
 def _abrir_mailto(destinatario: str, asunto: str, cuerpo: str) -> None:
-    """Abre el cliente de correo predeterminado vía protocolo mailto:."""
+    """Abre el cliente de correo predeterminado vía mailto:."""
     uri = (
         f"mailto:{quote(destinatario)}"
         f"?subject={quote(asunto)}"
@@ -241,7 +226,6 @@ class DialogoEnviarEmail(QDialog):
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(0)
 
-        # ─ Título
         fila_titulo = QHBoxLayout()
         icono = QLabel("✉️")
         icono.setFont(QFont("Segoe UI Emoji", 20))
@@ -256,7 +240,7 @@ class DialogoEnviarEmail(QDialog):
 
         lbl_sub = QLabel(
             f"Se abrirá una carpeta con <b>{self.pdf_firmado.name}</b> listo para adjuntar, "
-            f"y tu cliente de correo con el asunto prellenado."
+            "y tu cliente de correo con el asunto prellenado."
         )
         lbl_sub.setStyleSheet(f"color: {C_MUTED}; font-size: 12px;")
         lbl_sub.setWordWrap(True)
@@ -265,7 +249,6 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self._sep())
         lay.addSpacing(18)
 
-        # ─ Destinatario
         lbl_dest = QLabel("Correo destinatario")
         lbl_dest.setStyleSheet("font-weight: 600;")
         lay.addWidget(lbl_dest)
@@ -282,7 +265,6 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self.lbl_error)
         lay.addSpacing(16)
 
-        # ─ Resumen del documento
         lbl_resumen_titulo = QLabel("Resumen del documento")
         lbl_resumen_titulo.setStyleSheet("font-weight: 600;")
         lay.addWidget(lbl_resumen_titulo)
@@ -299,18 +281,16 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self._sep())
         lay.addSpacing(14)
 
-        # ─ Nota informativa
         lbl_nota = QLabel(
             "ℹ️  Se abrirá una carpeta temporal con solo el archivo a enviar "
-            "y tu cliente de correo. Arrastrá el PDF al correo y envía. "
-            "La carpeta se borra automáticamente en 30 minutos."
+            "y tu cliente de correo. Arrastrá el PDF al correo y enviá. "
+            "La carpeta se borra automáticamente al cerrar la app."
         )
         lbl_nota.setStyleSheet(f"font-size: 11px; color: {C_MUTED};")
         lbl_nota.setWordWrap(True)
         lay.addWidget(lbl_nota)
         lay.addSpacing(16)
 
-        # ─ Botones
         fila_btns = QHBoxLayout()
         fila_btns.setSpacing(10)
 
@@ -329,7 +309,6 @@ class DialogoEnviarEmail(QDialog):
         fila_btns.addWidget(self.btn_abrir)
         lay.addLayout(fila_btns)
 
-    # ── Validación ──────────────────────────────────────────────────
     def _on_email_changed(self, texto: str):
         texto = texto.strip()
         if not texto:
@@ -347,7 +326,6 @@ class DialogoEnviarEmail(QDialog):
         self.input_email.style().unpolish(self.input_email)
         self.input_email.style().polish(self.input_email)
 
-    # ── Acción principal ──────────────────────────────────────────────────
     def _on_abrir(self):
         destinatario = self.input_email.text().strip()
         if not _es_email_valido(destinatario):
@@ -371,13 +349,11 @@ class DialogoEnviarEmail(QDialog):
         cuerpo = (
             f"Estimado/a,\n\n"
             f"Adjunto encontrará el documento '{self.nombre_doc}' con las páginas firmadas.\n\n"
-            f"Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
+            "Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
         )
 
         try:
-            # Abrir carpeta temporal (solo el PDF a enviar)
             _abrir_explorador_temp(copia_temp.parent)
-            # Abrir cliente de correo con destinatario y asunto
             _abrir_mailto(destinatario, asunto, cuerpo)
         except Exception as e:
             QMessageBox.critical(
