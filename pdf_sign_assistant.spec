@@ -14,12 +14,38 @@
 # ============================================================
 
 import sys
+import sysconfig
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPEC).parent  # directorio raíz del proyecto
 
-# ── Datos a incluir en el bundle ───────────────────────────────────────────
+# ── Localizar python3XX.dll automáticamente ──────────────────────────────────────────
+# PyInstaller a veces no encuentra la DLL cuando Python fue instalado
+# solo para el usuario actual (AppData) en lugar de para todos los usuarios.
+# Este bloque la busca en las ubicaciones conocidas y la incluye como binario.
+_python_dll_name = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+_python_dll_candidates = [
+    # Instalación estándar para todos los usuarios
+    Path(sys.exec_prefix) / _python_dll_name,
+    # Instalación solo para el usuario actual
+    Path(sys.exec_prefix).parent / _python_dll_name,
+    # Windows\System32 (rara vez, pero posible)
+    Path(sysconfig.get_config_var("BINDIR") or sys.exec_prefix) / _python_dll_name,
+]
+
+_python_dll_path = None
+for _candidate in _python_dll_candidates:
+    if _candidate.is_file():
+        _python_dll_path = _candidate
+        print(f"[SPEC] python DLL encontrada: {_python_dll_path}")
+        break
+
+if _python_dll_path is None:
+    print(f"[SPEC] ADVERTENCIA: no se encontró {_python_dll_name} — "
+          f"PyInstaller intentará resolverla automáticamente.")
+
+# ── Datos a incluir en el bundle ─────────────────────────────────────────────────
 datas = [
     # config.json de ejemplo (el usuario lo completa en la carpeta del .exe)
     (str(ROOT / "config.json"),         "."),
@@ -63,13 +89,16 @@ hiddenimports = [
     "modules.setup",
 ]
 
-# ── Binarios extra (pywin32 DLLs) ────────────────────────────────────────
+# ── Binarios extra ──────────────────────────────────────────────────────────────
 binaries = []
 
-# Intentar incluir las DLLs de pywin32 automáticamente si están disponibles
+# Incluir python3XX.dll si la encontramos
+if _python_dll_path:
+    binaries.append((str(_python_dll_path), "."))
+
+# Incluir las DLLs de pywin32
 try:
     import win32api
-    import os
     win32_dir = Path(win32api.__file__).parent
     for dll in win32_dir.glob("*.dll"):
         binaries.append((str(dll), "."))
@@ -79,7 +108,12 @@ except Exception:
 # ── Análisis ───────────────────────────────────────────────────────────────────
 a = Analysis(
     ["main.py"],
-    pathex=[str(ROOT)],
+    pathex=[
+        str(ROOT),
+        # Añadir el directorio de Python al path de búsqueda
+        # para que PyInstaller encuentre la DLL durante el análisis
+        sys.exec_prefix,
+    ],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -87,13 +121,9 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Excluir PySimpleGUI (no se usa más)
         "PySimpleGUI",
-        # Excluir módulos innecesarios para reducir tamaño
         "tkinter",
         "unittest",
-        "email.headerregistry",
-        "xml.etree.ElementTree",
     ],
     noarchive=False,
     optimize=1,
@@ -111,13 +141,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,       # Sin ventana de consola (app GUI)
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/icon.ico",  # Descomentá cuando tengas un .ico
+    # icon="assets/icon.ico",
 )
 
 coll = COLLECT(
