@@ -12,6 +12,7 @@ Flujo principal:
   7. Botón ⚙ → abre DialogoAjustes (correo emisor).
   8. Botón ☉/🌙 → alterna entre modo claro y oscuro.
   9. Botón 📂 → abre la carpeta de documentos firmados en el Explorador.
+ 10. closeEvent → limpia _envio_temp/ antes de salir.
 
 NOTA PyInstaller:
   - Todas las dependencias deben estar instaladas antes de buildear:
@@ -39,7 +40,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QCloseEvent, QFont
 
 from modules.fase1_preview import VistaPrevisualizacion
 from modules.setup import get_base_dir
@@ -186,6 +187,17 @@ class VentanaPrincipal(QMainWindow):
         self._build_ui()
         self._cargar_guardados_existentes()
 
+    # ── Cierre de la app ───────────────────────────────────────────────────────────────
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        """Limpia la carpeta temporal de envíos antes de salir."""
+        try:
+            from modules.fase4_email import limpiar_temp_al_salir
+            limpiar_temp_al_salir(CARPETA_FIRMADO)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     # ── Construcción de UI ──────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -210,21 +222,18 @@ class VentanaPrincipal(QMainWindow):
         header.addWidget(lbl_titulo)
         header.addStretch()
 
-        # Toggle tema ☉/🌙
         self.btn_tema = _btn("🌙", ghost=True, height=40)
         self.btn_tema.setFixedWidth(44)
         self.btn_tema.setToolTip("Cambiar a modo oscuro")
         self.btn_tema.clicked.connect(self._toggle_tema)
         header.addWidget(self.btn_tema)
 
-        # Ajustes ⚙
         self.btn_ajustes = _btn("⚙", ghost=True, height=40)
         self.btn_ajustes.setFixedWidth(44)
         self.btn_ajustes.setToolTip("Ajustes")
         self.btn_ajustes.clicked.connect(self._abrir_ajustes)
         header.addWidget(self.btn_ajustes)
 
-        # Abrir PDF
         self.btn_abrir = _btn("＋  Abrir PDF", min_w=150, height=40)
         self.btn_abrir.clicked.connect(self.abrir_pdf)
         header.addWidget(self.btn_abrir)
@@ -234,7 +243,6 @@ class VentanaPrincipal(QMainWindow):
         root.addWidget(_sep())
         root.addSpacing(16)
 
-        # ─ Panel activo (oculto al inicio)
         self.panel_activo_container = QWidget()
         self.panel_activo_container.setVisible(False)
         self._lay_panel = QVBoxLayout(self.panel_activo_container)
@@ -246,7 +254,6 @@ class VentanaPrincipal(QMainWindow):
         self._sep_panel.setVisible(False)
         root.addWidget(self._sep_panel)
 
-        # ─ Sección: guardados
         root.addSpacing(14)
         hdr_guard = QHBoxLayout()
         lbl_g = QLabel("TRABAJOS GUARDADOS")
@@ -259,7 +266,6 @@ class VentanaPrincipal(QMainWindow):
         root.addLayout(hdr_guard)
         root.addSpacing(8)
 
-        # Lista
         self.lista_guardados = QListWidget()
         self.lista_guardados.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
@@ -272,7 +278,6 @@ class VentanaPrincipal(QMainWindow):
         )
         root.addWidget(self.lista_guardados)
 
-        # Panel vacío
         self.panel_vacio = QFrame()
         self.panel_vacio.setObjectName("panelVacio")
         lay_vacio = QVBoxLayout(self.panel_vacio)
@@ -300,7 +305,6 @@ class VentanaPrincipal(QMainWindow):
 
         root.addWidget(self.panel_vacio)
 
-        # ─ Acciones sobre guardados
         root.addSpacing(10)
         fila_acc = QHBoxLayout()
         fila_acc.setSpacing(8)
@@ -317,7 +321,6 @@ class VentanaPrincipal(QMainWindow):
 
         fila_acc.addStretch()
 
-        # ─ Botón abrir carpeta de firmados
         self.btn_carpeta = _btn("📂  Abrir carpeta", ghost=True, height=36)
         self.btn_carpeta.setToolTip(str(CARPETA_FIRMADO))
         self.btn_carpeta.clicked.connect(self._abrir_carpeta_firmados)
@@ -325,7 +328,6 @@ class VentanaPrincipal(QMainWindow):
 
         root.addLayout(fila_acc)
 
-        # Status bar
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Listo — abrí un PDF para comenzar.")
