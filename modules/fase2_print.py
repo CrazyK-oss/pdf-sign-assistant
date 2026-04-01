@@ -1,40 +1,24 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
 #
-# ESTRATEGIA: win32print + pypdf.
+# Código original restaurado (QPrintDialog nativo + drawImage).
 #
-# Por qué esta ruta:
-#   - QPrinter.handle() no existe en PyQt6 => no podemos llamar SetICMMode.
-#   - drawImage por GDI aplica el perfil ICC del driver HP => morado.
-#   - Solución: saltamos GDI por completo y enviamos el PDF directamente
-#     a la cola de impresión usando win32print con datatype "RAW" o
-#     el proveedor de impresión de Windows para PDF (XPS/EMF).
+# POR QUÉ EL MORADO APARECIÓ:
+#   El commit d9b35e8 quitó el cap de DPI para "máxima calidad".
+#   A DPI >= 600 el driver HP Smart Tank activa su pipeline ICM
+#   (Image Color Management) para modo foto, que aplica el perfil
+#   ICC del dispositivo y desplaza los colores -> morado/café.
+#   A DPI <= 300 el driver usa el pipeline de documentos simple,
+#   sin gestión de color => colores exactos.
 #
-# FLUJO:
-#   1. Mostrar un QDialog simple para elegir impresora (combo con las
-#      impresoras instaladas via win32print.EnumPrinters).
-#   2. Extraer la página con pypdf a un PDF temporal.
-#   3. Leer los bytes del PDF temporal.
-#   4. Abrirlo con win32print usando datatype "RAW" directamente al spool.
-#      El spooler de Windows procesa el PDF nativo => colores exactos,
-#      cero intermediarios, cero ICM involuntario.
-#
-# REQUISITO: pip install pywin32
+# SOLUCIÓN: cap de DPI en 300. La diferencia visual en documentos
+# de texto y PDF firmados es imperceptible frente a 600 DPI, pero
+# evita por completo el problema de color.
 
-import os
-import sys
-import tempfile
-
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QComboBox, QPushButton, QMessageBox
-)
-
-try:
-    from pypdf import PdfReader, PdfWriter
-    PYPDF_OK = True
-except ImportError:
-    PYPDF_OK = False
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
+from PyQt6.QtGui import QPainter, QImage
+from PyQt6.QtCore import Qt, QRect
+from PyQt6.QtWidgets import QMessageBox
 
 try:
     import fitz
@@ -42,159 +26,111 @@ try:
 except ImportError:
     PYMUPDF_OK = False
 
-try:
-    import win32print
-    WIN32_OK = True
-except ImportError:
-    WIN32_OK = False
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Diálogo de selección de impresora
-# ─────────────────────────────────────────────────────────────────────────
-
-class _DialogoImpresora(QDialog):
-    """Diálogo minimalista para elegir impresora instalada."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Imprimir")
-        self.setMinimumWidth(360)
-        self.impresora_elegida: str | None = None
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        layout.addWidget(QLabel("Impresora:"))
-
-        self._combo = QComboBox()
-        impresoras = [p[2] for p in win32print.EnumPrinters(
-            win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-        )]
-        default = win32print.GetDefaultPrinter()
-        self._combo.addItems(impresoras)
-        if default in impresoras:
-            self._combo.setCurrentText(default)
-        layout.addWidget(self._combo)
-
-        btns = QHBoxLayout()
-        btn_ok     = QPushButton("Imprimir")
-        btn_cancel = QPushButton("Cancelar")
-        btn_ok.setDefault(True)
-        btns.addStretch()
-        btns.addWidget(btn_cancel)
-        btns.addWidget(btn_ok)
-        layout.addLayout(btns)
-
-        btn_ok.clicked.connect(self._aceptar)
-        btn_cancel.clicked.connect(self.reject)
-
-    def _aceptar(self):
-        self.impresora_elegida = self._combo.currentText()
-        self.accept()
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Extracción de página
-# ─────────────────────────────────────────────────────────────────────────
-
-def _extraer_pagina(ruta_pdf: str, num_pagina: int) -> bytes | None:
-    """Extrae la página como bytes de PDF de 1 hoja."""
-    if PYPDF_OK:
-        try:
-            reader = PdfReader(ruta_pdf)
-            writer = PdfWriter()
-            writer.add_page(reader.pages[num_pagina])
-            import io
-            buf = io.BytesIO()
-            writer.write(buf)
-            return buf.getvalue()
-        except Exception:
-            pass
-
-    if PYMUPDF_OK:
-        try:
-            import io
-            src = fitz.open(ruta_pdf)
-            dst = fitz.open()
-            dst.insert_pdf(src, from_page=num_pagina, to_page=num_pagina)
-            buf = io.BytesIO()
-            dst.save(buf)
-            dst.close()
-            src.close()
-            return buf.getvalue()
-        except Exception:
-            pass
-
-    return None
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  API pública
-# ─────────────────────────────────────────────────────────────────────────
 
 class ImpresionPagina:
 
     @staticmethod
     def imprimir(ruta_pdf: str, num_pagina: int, parent=None) -> bool:
-        """
-        Imprime la página usando win32print (RAW spool directo).
-        Sin GDI, sin ICM, sin QPrinter => colores exactos.
-        """
-        if not WIN32_OK:
+        if not PYMUPDF_OK:
             QMessageBox.critical(
-                parent, "Dependencia faltante",
-                "Se necesita pywin32 para imprimir.\n\n"
-                "Instálalo con:\n    pip install pywin32"
+                parent,
+                "Dependencia faltante",
+                "PyMuPDF no está instalado.\n\n"
+                "Instálalo con:\n    pip install pymupdf\n\n"
+                "Luego reinicia la aplicación."
             )
             return False
 
-        if not PYPDF_OK and not PYMUPDF_OK:
-            QMessageBox.critical(
-                parent, "Dependencia faltante",
-                "Se necesita pypdf o PyMuPDF para imprimir.\n\n"
-                "Instálalo con:\n    pip install pypdf"
-            )
-            return False
+        # ── 1. Configurar QPrinter ──────────────────────────────────────
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setColorMode(QPrinter.ColorMode.Color)
+        printer.setFullPage(True)
 
-        # ── 1. Elegir impresora ──────────────────────────────────────────
-        dlg = _DialogoImpresora(parent)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return False
-        nombre_impresora = dlg.impresora_elegida
-
-        # ── 2. Extraer página como bytes PDF ──────────────────────────────
-        pdf_bytes = _extraer_pagina(ruta_pdf, num_pagina)
-        if not pdf_bytes:
-            QMessageBox.critical(
-                parent, "Error al preparar impresión",
-                "No se pudo extraer la página del PDF."
-            )
-            return False
-
-        # ── 3. Enviar al spooler con win32print RAW ────────────────────────
-        #
-        # Datatype "RAW": el spooler de Windows pasa los bytes directamente
-        # al driver sin ningún procesamiento GDI/ICM adicional.
-        # El driver HP Smart Tank 530 acepta RAW PDF via su filtro XPS.
         try:
-            hprinter = win32print.OpenPrinter(nombre_impresora)
-            try:
-                win32print.StartDocPrinter(
-                    hprinter, 1,
-                    (f"PDF-Sign-Assistant pág {num_pagina + 1}", None, "RAW")
+            with fitz.open(ruta_pdf) as doc_tmp:
+                rect = doc_tmp[num_pagina].rect
+                printer.setPageOrientation(
+                    QPrinter.Orientation.Landscape if rect.width > rect.height
+                    else QPrinter.Orientation.Portrait
                 )
-                win32print.StartPagePrinter(hprinter)
-                win32print.WritePrinter(hprinter, pdf_bytes)
-                win32print.EndPagePrinter(hprinter)
-                win32print.EndDocPrinter(hprinter)
-            finally:
-                win32print.ClosePrinter(hprinter)
-            return True
+        except Exception:
+            pass
+
+        # ── 2. Diálogo nativo de Windows ───────────────────────────────
+        dialog = QPrintDialog(printer, parent)
+        dialog.setWindowTitle(f"Imprimir \u2014 P\u00e1gina {num_pagina + 1}")
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return False
+
+        # ── 3. Renderizar ──────────────────────────────────────────────
+        #
+        # DPI CAP = 300.
+        # Por encima de 300 DPI el driver HP activa ICM (modo foto)
+        # y aplica su perfil de color ICC => resultado morado/café.
+        # 300 DPI es más que suficiente para documentos y PDFs firmados.
+        dpi = min(printer.resolution(), 300)
+        if dpi <= 0:
+            dpi = 300
+
+        doc = None
+        try:
+            doc    = fitz.open(ruta_pdf)
+            pagina = doc[num_pagina]
+            zoom   = dpi / 72.0
+            pix    = pagina.get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom),
+                colorspace=fitz.csRGB,
+                alpha=False,
+            )
         except Exception as e:
             QMessageBox.critical(
-                parent, "Error de impresión",
-                f"No se pudo enviar a la impresora:\n\n{e}"
+                parent,
+                "Error al procesar el PDF",
+                f"No se pudo renderizar la p\u00e1gina:\n\n{e}"
             )
             return False
+        finally:
+            if doc:
+                doc.close()
+
+        # ── 4. fitz pixmap → QImage ───────────────────────────────────
+        img = QImage(
+            bytes(pix.samples),
+            pix.width,
+            pix.height,
+            pix.stride,
+            QImage.Format.Format_RGB888,
+        )
+        img.setDotsPerMeterX(int(dpi / 0.0254))
+        img.setDotsPerMeterY(int(dpi / 0.0254))
+
+        # ── 5. Pintar ──────────────────────────────────────────────────
+        painter = QPainter()
+        if not painter.begin(printer):
+            QMessageBox.critical(
+                parent,
+                "Error de impresión",
+                "No se pudo iniciar el proceso de impresión.\n"
+                "Verific\u00e1 que la impresora est\u00e9 disponible y sin errores."
+            )
+            return False
+
+        try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            viewport  = painter.viewport()
+            img_size  = img.size().scaled(
+                viewport.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+            x_off = (viewport.width()  - img_size.width())  // 2
+            y_off = (viewport.height() - img_size.height()) // 2
+            painter.drawImage(
+                QRect(x_off, y_off, img_size.width(), img_size.height()),
+                img,
+            )
+        finally:
+            painter.end()
+
+        return True
