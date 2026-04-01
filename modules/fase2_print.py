@@ -1,32 +1,41 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
 #
-# DIAGNÓSTICO DEFINITIVO DEL MORADO
-# ─────────────────────────────────────────────────────────────────────────────
-# El código original (Format_RGB888 + drawImage) imprimía bien.
-# El morado NO es un bug de Qt ni del código: es el ICM (Image Color
-# Management) de Windows aplicando un perfil de color al bitmap RGB antes
-# de mandárselo al driver HP Smart Tank.
+# ESTRATEGIA: delegar la impresión al visor PDF nativo del sistema.
 #
-# Windows GDI tiene ICM activado por defecto para impresoras. Cuando el
-# driver HP recibe el bitmap, GDI aplica primero su perfil de color ICC
-# (normalmente sRGB -> perfil del dispositivo). En la HP Smart Tank ese
-# perfil tiene un error conocido: mapea el canal azul muy por encima del
-# rojo -> los colores oscuros viajan hacia el morado.
+# Por qué abandoné QPrinter / QPainter:
+#   - QPrinter.handle() fue eliminado en PyQt6 (no existe).
+#   - Todas las rutas de drawImage/drawPixmap sobre QPrinter en Windows
+#     pasan por GDI, que aplica el perfil ICC del driver HP Smart Tank
+#     y desplaza los colores (morado, café). No hay forma de desactivarlo
+#     desde PyQt6 porque handle() ya no está disponible.
 #
-# Solución: desactivar ICM en el contexto del dispositivo (HDC) de la
-# impresora con SetICMMode(hdc, ICM_OFF) ANTES de que QPainter empiece
-# a pintar. Así GDI pasa el bitmap RGB sin ninguna transformación y el
-# driver recibe exactamente los bytes que generó fitz.
+# SOLUCIÓN: os.startfile(ruta_pdf, "print")
+#   Windows asocia el verbo "print" al visor PDF predeterminado (Adobe,
+#   Edge, SumatraPDF, Foxit, etc.). Ese visor:
+#     1. Abre el PDF.
+#     2. Envía la página a la impresora usando su propio pipeline nativo.
+#     3. Gestiona el perfil de color correctamente.
+#     4. Cierra solo en segundo plano.
+#   Resultado: colores exactos, sin morado, sin ningún procesamiento
+#   intermedio nuestro.
 #
-# Referencia: https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-seticmmode
-# Referencia: Qt Forum -- "Printing a QImage has color distortion" (2016)
-# ─────────────────────────────────────────────────────────────────────────────
+# LIMITACIÓN: no podemos filtrar a una sola página con este verbo,
+# así que extraemos la página a un PDF temporal de 1 hoja y lo imprimimos.
+# El temporal se borra automáticamente al salir del proceso (tempfile).
 
-from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
-from PyQt6.QtGui import QPainter, QImage
-from PyQt6.QtCore import Qt, QRect
+import os
+import sys
+import tempfile
+from pathlib import Path
+
 from PyQt6.QtWidgets import QMessageBox
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    PYPDF_OK = True
+except ImportError:
+    PYPDF_OK = False
 
 try:
     import fitz
@@ -34,130 +43,96 @@ try:
 except ImportError:
     PYMUPDF_OK = False
 
-# ctypes para llamar a SetICMMode solo en Windows
-try:
-    import ctypes
-    import ctypes.wintypes
-    _gdi32 = ctypes.windll.gdi32
-    ICM_OFF = 1
-    _WIN32_OK = True
-except Exception:
-    _WIN32_OK = False
 
+def _extraer_pagina(ruta_pdf: str, num_pagina: int) -> str | None:
+    """
+    Extrae una sola página a un PDF temporal y devuelve su ruta.
+    Intenta primero con pypdf, luego con fitz como fallback.
+    Devuelve None si ninguno está disponible.
+    """
+    if PYPDF_OK:
+        try:
+            reader = PdfReader(ruta_pdf)
+            writer = PdfWriter()
+            writer.add_page(reader.pages[num_pagina])
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".pdf", delete=False, prefix="psa_print_"
+            )
+            writer.write(tmp)
+            tmp.close()
+            return tmp.name
+        except Exception:
+            pass
 
-def _disable_icm(hdc_int: int) -> None:
-    """Desactiva ICM (gestión de color de Windows) en el HDC dado."""
-    if not _WIN32_OK or not hdc_int:
-        return
-    try:
-        _gdi32.SetICMMode(ctypes.wintypes.HDC(hdc_int), ICM_OFF)
-    except Exception:
-        pass
+    if PYMUPDF_OK:
+        try:
+            src = fitz.open(ruta_pdf)
+            dst = fitz.open()
+            dst.insert_pdf(src, from_page=num_pagina, to_page=num_pagina)
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".pdf", delete=False, prefix="psa_print_"
+            )
+            dst.save(tmp.name)
+            dst.close()
+            src.close()
+            tmp.close()
+            return tmp.name
+        except Exception:
+            pass
+
+    return None
 
 
 class ImpresionPagina:
 
     @staticmethod
     def imprimir(ruta_pdf: str, num_pagina: int, parent=None) -> bool:
-        if not PYMUPDF_OK:
+        """
+        Imprime la página indicada del PDF usando el visor nativo del OS.
+        Extrae la página a un temporal y usa os.startfile con verbo 'print'.
+
+        Returns True si se envió a imprimir, False si el usuario canceló
+        o hubo un error.
+        """
+        if not PYPDF_OK and not PYMUPDF_OK:
             QMessageBox.critical(
                 parent,
                 "Dependencia faltante",
-                "PyMuPDF no está instalado.\n\n"
-                "Instálalo con:\n    pip install pymupdf\n\n"
-                "Luego reinicia la aplicación."
+                "Se necesita pypdf o PyMuPDF para imprimir.\n\n"
+                "Instálalo con:\n    pip install pypdf"
             )
             return False
 
-        # ── 1. Configurar QPrinter ──────────────────────────────────────
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setColorMode(QPrinter.ColorMode.Color)
-        printer.setFullPage(True)
-
-        try:
-            with fitz.open(ruta_pdf) as doc_tmp:
-                rect = doc_tmp[num_pagina].rect
-                if rect.width > rect.height:
-                    printer.setPageOrientation(QPrinter.Orientation.Landscape)
-                else:
-                    printer.setPageOrientation(QPrinter.Orientation.Portrait)
-        except Exception:
-            pass
-
-        # ── 2. Diálogo nativo ───────────────────────────────────────────
-        dialog = QPrintDialog(printer, parent)
-        dialog.setWindowTitle(f"Imprimir \u2014 P\u00e1gina {num_pagina + 1}")
-        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+        if sys.platform != "win32":
+            QMessageBox.warning(
+                parent,
+                "Plataforma no soportada",
+                "La impresión nativa solo está disponible en Windows."
+            )
             return False
 
-        # ── 3. Desactivar ICM en el HDC de Windows ──────────────────────
-        # handle() solo es válido después de aceptar QPrintDialog.
-        _disable_icm(printer.handle())
-
-        # ── 4. Renderizar al DPI real ───────────────────────────────────
-        dpi = printer.resolution()
-        if dpi <= 0:
-            dpi = 300
-
-        doc = None
-        try:
-            doc    = fitz.open(ruta_pdf)
-            pagina = doc[num_pagina]
-            zoom   = dpi / 72.0
-            pix    = pagina.get_pixmap(
-                matrix=fitz.Matrix(zoom, zoom),
-                colorspace=fitz.csRGB,
-                alpha=False,
+        # Extraer la página a un PDF temporal de 1 hoja
+        ruta_tmp = _extraer_pagina(ruta_pdf, num_pagina)
+        if not ruta_tmp:
+            QMessageBox.critical(
+                parent,
+                "Error al preparar impresión",
+                "No se pudo extraer la página del PDF.\n"
+                "Verificá que el archivo no esté protegido."
             )
+            return False
+
+        # Enviar al visor PDF predeterminado con verbo 'print'
+        # El visor abre el diálogo de impresión nativo con todos los colores
+        # correctos y se cierra solo en segundo plano.
+        try:
+            os.startfile(ruta_tmp, "print")
+            return True
         except Exception as e:
             QMessageBox.critical(
                 parent,
-                "Error al procesar el PDF",
-                f"No se pudo renderizar la p\u00e1gina:\n\n{e}"
-            )
-            return False
-        finally:
-            if doc:
-                doc.close()
-
-        # ── 5. fitz pixmap → QImage RGB888 ─────────────────────────────
-        img = QImage(
-            bytes(pix.samples),
-            pix.width,
-            pix.height,
-            pix.stride,
-            QImage.Format.Format_RGB888,
-        )
-        img.setDotsPerMeterX(int(dpi / 0.0254))
-        img.setDotsPerMeterY(int(dpi / 0.0254))
-
-        # ── 6. Pintar ──────────────────────────────────────────────────
-        painter = QPainter()
-        if not painter.begin(printer):
-            QMessageBox.critical(
-                parent,
                 "Error de impresión",
-                "No se pudo iniciar el proceso de impresión.\n"
-                "Verific\u00e1 que la impresora est\u00e9 disponible y sin errores."
+                f"No se pudo abrir el visor PDF para imprimir:\n\n{e}\n\n"
+                "Verificá que haya un visor de PDF instalado (Edge, Adobe, SumatraPDF)."
             )
             return False
-
-        try:
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-            viewport  = painter.viewport()
-            img_size  = img.size().scaled(
-                viewport.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-            )
-            x_off = (viewport.width()  - img_size.width())  // 2
-            y_off = (viewport.height() - img_size.height()) // 2
-            painter.drawImage(
-                QRect(x_off, y_off, img_size.width(), img_size.height()),
-                img,
-            )
-        finally:
-            painter.end()
-
-        return True
