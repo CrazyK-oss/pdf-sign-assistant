@@ -6,19 +6,18 @@ Fase 4 – Enviar el PDF firmado por correo.
 Estrategia de envío según el servidor configurado:
 
   • Outlook / Microsoft 365 / Hotmail
-      → exchangelib (NTLM / basic auth corporativo)
+      → exchangelib (EWS – Exchange Web Services)
       → Detectado automáticamente si el servidor contiene
-        'outlook', 'office365', 'hotmail' o 'live'
+        'outlook', 'office365', 'hotmail', 'live' o 'microsoft'
+      → Fallback a SMTP smtp.office365.com:587 si exchangelib falla
 
   • Gmail y cualquier otro SMTP estándar
       → Intento 1: STARTTLS en el puerto configurado (587)
       → Intento 2: SSL implícito en 465
-      → Para Gmail se necesita una Contraseña de Aplicación
-        (Google → Seguridad → Verificación en 2 pasos → Contraseñas de app)
+      → Gmail requiere Contraseña de Aplicación
 
-Dependencias opcionales:
-    pip install exchangelib          # solo para Outlook
-    pip install pywin32              # ya requerido por módulo de impresión
+Dependencias:
+    pip install exchangelib          # para la ruta Outlook
 """
 
 import re
@@ -42,14 +41,12 @@ try:
         Account, Credentials, Configuration,
         DELEGATE, FileAttachment, Message,
     )
-    from exchangelib.protocol import BaseProtocol
-    import urllib3
     EXCHANGE_OK = True
 except ImportError:
     EXCHANGE_OK = False
 
 
-# ── Paleta ────────────────────────────────────────────────────────────────────
+# ── Paleta ───────────────────────────────────────────────────────────────────
 C_BG        = "#f7f6f2"
 C_SURFACE   = "#f3f0ec"
 C_BORDER    = "#d4d1ca"
@@ -58,12 +55,8 @@ C_MUTED     = "#7a7974"
 C_PRIMARY   = "#01696f"
 C_PRIMARY_H = "#0c4e54"
 C_PRIMARY_A = "#0f3638"
-C_PRIMARY_HL= "#cedcd8"
-C_SUCCESS   = "#437a22"
-C_SUCCESS_BG= "#d4dfcc"
-C_DANGER    = "#a13544"
-C_ERROR_TXT = "#a13544"
 C_FAINT     = "#bab9b4"
+C_ERROR_TXT = "#a13544"
 
 STYLESHEET_DIALOG = f"""
 QDialog, QWidget {{
@@ -128,8 +121,8 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] {{
 """
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-EMAIL_REGEX = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.]{2,}$")
-OUTLOOK_KEYWORDS = ("outlook", "office365", "hotmail", "live", "microsoft")
+EMAIL_REGEX       = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.]{2,}$")
+OUTLOOK_KEYWORDS  = ("outlook", "office365", "hotmail", "live", "microsoft")
 
 
 def _es_email_valido(email: str) -> bool:
@@ -137,8 +130,7 @@ def _es_email_valido(email: str) -> bool:
 
 
 def _es_outlook(servidor: str) -> bool:
-    s = servidor.lower()
-    return any(kw in s for kw in OUTLOOK_KEYWORDS)
+    return any(kw in servidor.lower() for kw in OUTLOOK_KEYWORDS)
 
 
 def _construir_resumen(nombre_doc: str, paginas: list) -> str:
@@ -150,28 +142,25 @@ def _construir_resumen(nombre_doc: str, paginas: list) -> str:
     )
 
 
-def _construir_mime(config: dict, destinatario: str,
-                    pdf_path: Path, nombre_doc: str) -> MIMEMultipart:
+def _construir_mime(
+    config: dict, destinatario: str, pdf_path: Path, nombre_doc: str
+) -> MIMEMultipart:
     msg = MIMEMultipart()
     msg["From"]    = config["email_user"]
     msg["To"]      = destinatario
     msg["Subject"] = f"Documento Firmado: {nombre_doc}"
-    cuerpo = (
+    msg.attach(MIMEText(
         f"Estimado/a,\n\n"
-        f"Adjunto encontrará el documento '{nombre_doc}' "
-        f"con las páginas firmadas.\n\n"
-        f"Este correo fue generado automáticamente por PDF Sign Assistant.\n"
-    )
-    msg.attach(MIMEText(cuerpo, "plain", "utf-8"))
+        f"Adjunto encontrará el documento '{nombre_doc}' con las páginas firmadas.\n\n"
+        f"Este correo fue generado automáticamente por PDF Sign Assistant.\n",
+        "plain", "utf-8",
+    ))
     with open(pdf_path, "rb") as f:
-        adjunto = MIMEBase("application", "octet-stream")
-        adjunto.set_payload(f.read())
-    encoders.encode_base64(adjunto)
-    adjunto.add_header(
-        "Content-Disposition",
-        f'attachment; filename="{pdf_path.name}"',
-    )
-    msg.attach(adjunto)
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", f'attachment; filename="{pdf_path.name}"')
+    msg.attach(part)
     return msg
 
 
@@ -188,9 +177,9 @@ class _SmtpWorker(QThread):
         self.pdf_path     = pdf_path
         self.nombre_doc   = nombre_doc
 
+    # ── Punto de entrada ───────────────────────────────────────────────────
     def run(self):
         server   = self.config.get("smtp_server", "smtp.office365.com")
-        port     = int(self.config.get("smtp_port", 587))
         user     = self.config.get("email_user", "")
         password = self.config.get("email_password", "")
 
@@ -200,12 +189,86 @@ class _SmtpWorker(QThread):
                 "Ir a Ajustes (⚙) y completar correo y contraseña.")
             return
 
-        # — Ruta Outlook / Microsoft —
         if _es_outlook(server):
             self._enviar_outlook(user, password)
-            return
+        else:
+            self._enviar_smtp_generico(server,
+                                       int(self.config.get("smtp_port", 587)),
+                                       user, password)
 
-        # — Ruta SMTP genérico (Gmail, etc.) —
+    # ── Ruta Outlook ──────────────────────────────────────────────────────
+    def _enviar_outlook(self, user: str, password: str):
+        if not EXCHANGE_OK:
+            print("[FASE 4] exchangelib no instalado → SMTP Outlook…")
+            self._enviar_smtp_outlook(user, password)
+            return
+        try:
+            creds   = Credentials(username=user, password=password)
+            cfg     = Configuration(
+                server="outlook.office365.com",
+                credentials=creds,
+            )
+            account = Account(
+                primary_smtp_address=user,
+                config=cfg,
+                autodiscover=False,
+                access_type=DELEGATE,
+            )
+            with open(self.pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+
+            m = Message(
+                account=account,
+                subject=f"Documento Firmado: {self.nombre_doc}",
+                body=(
+                    f"Estimado/a,\n\n"
+                    f"Adjunto encontrará el documento '{self.nombre_doc}' "
+                    f"con las páginas firmadas.\n\n"
+                    f"Este correo fue generado automáticamente por PDF Sign Assistant.\n"
+                ),
+                to_recipients=[self.destinatario],
+            )
+            m.attach(FileAttachment(name=self.pdf_path.name, content=pdf_bytes))
+            m.send()
+            print(f"[FASE 4] ✓ Email enviado (exchangelib) a: {self.destinatario}")
+            self.resultado.emit(True, "")
+
+        except Exception as e:
+            err = str(e).lower()
+            if any(k in err for k in ("unauthorized", "401", "authentication",
+                                      "invalid credentials", "failed logon")):
+                self.resultado.emit(False, self._msg_auth_outlook())
+            else:
+                # Cualquier otro error de exchangelib → intentar SMTP directo
+                print(f"[FASE 4] exchangelib falló ({e}) → SMTP Outlook…")
+                self._enviar_smtp_outlook(user, password)
+
+    def _enviar_smtp_outlook(self, user: str, password: str):
+        """SMTP directo contra smtp.office365.com:587 con STARTTLS."""
+        try:
+            msg = _construir_mime(self.config, self.destinatario,
+                                   self.pdf_path, self.nombre_doc)
+            with smtplib.SMTP("smtp.office365.com", 587,
+                               timeout=self._TIMEOUT) as srv:
+                srv.ehlo()
+                srv.starttls()
+                srv.ehlo()
+                srv.login(user, password)
+                srv.sendmail(user, self.destinatario, msg.as_string())
+            print(f"[FASE 4] ✓ Email enviado (SMTP Outlook) a: {self.destinatario}")
+            self.resultado.emit(True, "")
+        except smtplib.SMTPAuthenticationError:
+            self.resultado.emit(False, self._msg_auth_outlook())
+        except Exception as e:
+            self.resultado.emit(
+                False,
+                f"No se pudo enviar el correo por Outlook.\n\n"
+                f"Verificá las credenciales en Ajustes (⚙).\n\nError: {e}"
+            )
+
+    # ── Ruta SMTP genérico (Gmail, etc.) ───────────────────────────────
+    def _enviar_smtp_generico(self, server: str, port: int,
+                               user: str, password: str):
         try:
             msg = _construir_mime(self.config, self.destinatario,
                                    self.pdf_path, self.nombre_doc)
@@ -213,7 +276,7 @@ class _SmtpWorker(QThread):
             self.resultado.emit(False, f"Error al preparar el adjunto:\n{e}")
             return
 
-        ultimo_error = None
+        ultimo_error: Exception | None = None
 
         # Intento 1: STARTTLS
         try:
@@ -231,7 +294,7 @@ class _SmtpWorker(QThread):
             return
         except (smtplib.SMTPException, OSError, TimeoutError) as e:
             ultimo_error = e
-            print(f"[FASE 4] STARTTLS falló ({e}), reintentando con SSL/465…")
+            print(f"[FASE 4] STARTTLS falló ({e}) → SSL/465…")
 
         # Intento 2: SSL implícito en 465
         try:
@@ -241,7 +304,6 @@ class _SmtpWorker(QThread):
                 srv.sendmail(user, self.destinatario, msg.as_string())
             print(f"[FASE 4] ✓ Email enviado (SSL/465) a: {self.destinatario}")
             self.resultado.emit(True, "")
-            return
         except smtplib.SMTPAuthenticationError:
             self.resultado.emit(False, self._msg_auth_smtp())
         except (smtplib.SMTPConnectError, OSError) as e:
@@ -257,84 +319,7 @@ class _SmtpWorker(QThread):
         except Exception as e:
             self.resultado.emit(False, f"Error inesperado al enviar:\n{e}")
 
-    def _enviar_outlook(self, user: str, password: str):
-        """
-        Envía usando exchangelib (soporta cuentas Outlook.com,
-        Office 365 corporativas, Hotmail, Live).
-        """
-        if not EXCHANGE_OK:
-            # Si no está instalado, caemos a SMTP con smtp.office365.com:587
-            print("[FASE 4] exchangelib no instalado, usando SMTP para Outlook…")
-            self._enviar_outlook_smtp(user, password)
-            return
-
-        try:
-            # Suprimir advertencias de SSL si el servidor usa cert autofirmado
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            BaseProtocol.HTTP_ADAPTER_CLS = None  # usa adapter por defecto
-
-            creds  = Credentials(username=user, password=password)
-            config = Configuration(server="outlook.office365.com", credentials=creds)
-            account = Account(
-                primary_smtp_address=user,
-                config=config,
-                autodiscover=False,
-                access_type=DELEGATE,
-            )
-
-            with open(self.pdf_path, "rb") as f:
-                contenido_pdf = f.read()
-
-            mensaje = Message(
-                account=account,
-                subject=f"Documento Firmado: {self.nombre_doc}",
-                body=(
-                    f"Estimado/a,\n\n"
-                    f"Adjunto encontrará el documento '{self.nombre_doc}' "
-                    f"con las páginas firmadas.\n\n"
-                    f"Este correo fue generado automáticamente por "
-                    f"PDF Sign Assistant.\n"
-                ),
-                to_recipients=[self.destinatario],
-            )
-            mensaje.attach(FileAttachment(
-                name=self.pdf_path.name,
-                content=contenido_pdf,
-            ))
-            mensaje.send()
-            print(f"[FASE 4] ✓ Email enviado (exchangelib) a: {self.destinatario}")
-            self.resultado.emit(True, "")
-
-        except Exception as e:
-            err = str(e).lower()
-            if "unauthorized" in err or "401" in err or "authentication" in err:
-                self.resultado.emit(False, self._msg_auth_outlook())
-            else:
-                # Fallback a SMTP si exchangelib falla por otra razón
-                print(f"[FASE 4] exchangelib falló ({e}), fallback a SMTP…")
-                self._enviar_outlook_smtp(user, password)
-
-    def _enviar_outlook_smtp(self, user: str, password: str):
-        """Fallback SMTP directo contra smtp.office365.com:587 (STARTTLS)."""
-        try:
-            msg = _construir_mime(self.config, self.destinatario,
-                                   self.pdf_path, self.nombre_doc)
-            with smtplib.SMTP("smtp.office365.com", 587, timeout=self._TIMEOUT) as srv:
-                srv.ehlo()
-                srv.starttls()
-                srv.ehlo()
-                srv.login(user, password)
-                srv.sendmail(user, self.destinatario, msg.as_string())
-            print(f"[FASE 4] ✓ Email enviado (SMTP Outlook) a: {self.destinatario}")
-            self.resultado.emit(True, "")
-        except smtplib.SMTPAuthenticationError:
-            self.resultado.emit(False, self._msg_auth_outlook())
-        except Exception as e:
-            self.resultado.emit(False,
-                f"No se pudo enviar el correo por Outlook.\n\n"
-                f"Verificá las credenciales en Ajustes (⚙).\n\n"
-                f"Error: {e}")
-
+    # ── Mensajes de error ────────────────────────────────────────────────
     @staticmethod
     def _msg_auth_smtp() -> str:
         return (
@@ -347,13 +332,13 @@ class _SmtpWorker(QThread):
     @staticmethod
     def _msg_auth_outlook() -> str:
         return (
-            "Error de autenticación con Outlook.\n\n"
+            "Error de autenticación con Outlook / Microsoft 365.\n\n"
             "Verificá:\n"
-            "• El correo es el de tu cuenta Microsoft (ej: usuario@outlook.com)\n"
+            "• El correo es correcto (ej: usuario@outlook.com)\n"
             "• La contraseña es la de tu cuenta Microsoft\n"
-            "• Si usás cuenta corporativa, puede requerir\n"
+            "• Si es cuenta corporativa, podía requerir\n"
             "  una Contraseña de Aplicación en el portal de Microsoft 365\n"
-            "• Que la autenticación básica no esté bloqueada por el administrador"
+            "• Que tu admin no haya bloqueado autenticación básica"
         )
 
 
@@ -386,6 +371,7 @@ class DialogoEnviarEmail(QDialog):
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(0)
 
+        # ─ Título
         fila_titulo = QHBoxLayout()
         icono = QLabel("✉️")
         icono.setFont(QFont("Segoe UI Emoji", 20))
@@ -406,6 +392,7 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self._sep())
         lay.addSpacing(18)
 
+        # ─ Destinatario
         lbl_dest = QLabel("Correo destinatario")
         lbl_dest.setStyleSheet("font-weight: 600;")
         lay.addWidget(lbl_dest)
@@ -422,6 +409,7 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self.lbl_error)
         lay.addSpacing(16)
 
+        # ─ Resumen
         lbl_resumen_titulo = QLabel("Resumen del documento")
         lbl_resumen_titulo.setStyleSheet("font-weight: 600;")
         lay.addWidget(lbl_resumen_titulo)
@@ -430,24 +418,25 @@ class DialogoEnviarEmail(QDialog):
         self.txt_resumen = QTextEdit()
         self.txt_resumen.setReadOnly(True)
         self.txt_resumen.setFixedHeight(82)
-        self.txt_resumen.setPlainText(_construir_resumen(self.nombre_doc, self.paginas))
+        self.txt_resumen.setPlainText(
+            _construir_resumen(self.nombre_doc, self.paginas))
         lay.addWidget(self.txt_resumen)
         lay.addSpacing(20)
         lay.addWidget(self._sep())
         lay.addSpacing(16)
 
-        # Mostrar qué método se usará según el servidor configurado
-        server  = self.config.get("smtp_server", "smtp.office365.com")
-        emisor  = self.config.get("email_user", "")
-        metodo  = "Outlook (exchangelib)" if _es_outlook(server) else "SMTP"
+        # ─ Emisor + método
+        server = self.config.get("smtp_server", "smtp.office365.com")
+        emisor = self.config.get("email_user", "")
+        metodo = "Outlook (exchangelib)" if _es_outlook(server) else "SMTP"
         if emisor:
             lbl_emisor = QLabel(
-                f"📤  Correo emisor: <b>{emisor}</b>"
-                f"<span style='color:{C_FAINT};'> · {metodo}</span>"
+                f"📤  Correo emisor: <b>{emisor}</b>"
+                f"<span style='color:{C_FAINT};'> · {metodo}</span>"
             )
         else:
             lbl_emisor = QLabel(
-                "⚠️  No hay correo emisor configurado.  "
+                "⚠️  No hay correo emisor configurado.  "
                 "<a href='settings'>Ir a Ajustes</a>"
             )
             lbl_emisor.linkActivated.connect(self._pedir_abrir_ajustes)
@@ -456,6 +445,7 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(lbl_emisor)
         lay.addSpacing(16)
 
+        # ─ Botones
         fila_btns = QHBoxLayout()
         fila_btns.setSpacing(10)
 
@@ -467,7 +457,7 @@ class DialogoEnviarEmail(QDialog):
         fila_btns.addWidget(btn_cancelar)
         fila_btns.addStretch()
 
-        self.btn_enviar = QPushButton("✉️  Enviar documento")
+        self.btn_enviar = QPushButton("✉️  Enviar documento")
         self.btn_enviar.setMinimumWidth(180)
         self.btn_enviar.setEnabled(False)
         self.btn_enviar.clicked.connect(self._iniciar_envio)
@@ -521,12 +511,13 @@ class DialogoEnviarEmail(QDialog):
         if ok:
             QMessageBox.information(
                 self, "✅ Enviado",
-                f"Documento enviado correctamente a:\n{self.input_email.text().strip()}",
+                f"Documento enviado correctamente a:\n"
+                f"{self.input_email.text().strip()}",
             )
             self.accept()
         else:
             QMessageBox.critical(self, "Error al enviar", error)
-            self.btn_enviar.setText("✉️  Enviar documento")
+            self.btn_enviar.setText("✉️  Enviar documento")
             self.btn_enviar.setEnabled(True)
             self.input_email.setEnabled(True)
 
@@ -546,11 +537,10 @@ def enviar_documento(
     nombre_doc: str,
     parent=None,
 ) -> None:
-    dialogo = DialogoEnviarEmail(
+    DialogoEnviarEmail(
         pdf_firmado=pdf_firmado,
         config=config,
         paginas=paginas,
         nombre_doc=nombre_doc,
         parent=parent,
-    )
-    dialogo.exec()
+    ).exec()
