@@ -5,15 +5,16 @@ Fase 4 – Enviar el PDF firmado por correo.
 
 Estrategia:
   1. El usuario escribe el destinatario y confirma.
-  2. Se abre Outlook (o el cliente predeterminado) con:
-       - Para: destinatario
-       - Asunto rellenado
-       - El PDF adjuntado automáticamente vía win32com.client
-         (Outlook COM). Si COM falla o no es Windows, se abre
-         un mailto: simple sin adjunto.
+  2. Se abre el cliente de correo predeterminado del sistema
+     (o el navegador si está asociado) vía protocolo mailto:.
+     - Para: destinatario
+     - Asunto rellenado automáticamente
+     - Cuerpo con el nombre del documento
+  3. El adjunto NO se puede enviar automáticamente por limitación
+     del protocolo mailto:. La app informa la ruta del PDF para
+     que el usuario lo adjunte manualmente dentro del cliente.
 
-Dependencias:
-    pywin32  (pip install pywin32)  – ya requerido por fase2_print
+No requiere pywin32, Outlook ni ningún cliente específico.
 """
 
 import os
@@ -123,68 +124,25 @@ def _construir_resumen(nombre_doc: str, paginas: list) -> str:
     )
 
 
-# ── Lógica de apertura del cliente de correo ──────────────────────────────
+# ── Lógica mailto: ────────────────────────────────────────────────────────────
 
-def _abrir_outlook_com(destinatario: str, asunto: str,
-                       cuerpo: str, pdf_path: Path) -> bool:
+def _abrir_mailto(destinatario: str, asunto: str, cuerpo: str) -> None:
     """
-    Abre un borrador de Outlook con el PDF adjuntado usando la API COM.
-    Devuelve True si tuvo éxito.
+    Abre el cliente de correo predeterminado (o navegador asociado)
+    via protocolo mailto:. No puede adjuntar archivos por diseño
+    del protocolo; el adjunto debe hacerse manualmente.
     """
-    try:
-        import win32com.client  # parte de pywin32
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        mail    = outlook.CreateItem(0)  # 0 = MailItem
-        mail.To      = destinatario
-        mail.Subject = asunto
-        mail.Body    = cuerpo
-        mail.Attachments.Add(str(pdf_path.resolve()))
-        mail.Display(True)   # True = modal (espera al usuario)
-        return True
-    except Exception as e:
-        print(f"[FASE 4] Outlook COM falló ({e}), fallback a mailto:")
-        return False
-
-
-def _abrir_mailto(destinatario: str, asunto: str) -> None:
-    """
-    Fallback: abre el cliente de correo predeterminado vía mailto:.
-    No puede adjuntar archivos (limitación del protocolo).
-    """
-    uri = f"mailto:{quote(destinatario)}?subject={quote(asunto)}"
+    uri = (
+        f"mailto:{quote(destinatario)}"
+        f"?subject={quote(asunto)}"
+        f"&body={quote(cuerpo)}"
+    )
     if sys.platform == "win32":
         os.startfile(uri)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", uri])
     else:
         subprocess.Popen(["xdg-open", uri])
-
-
-def _enviar_con_cliente(
-    destinatario: str, pdf_path: Path, nombre_doc: str
-) -> str | None:
-    """
-    Intenta abrir Outlook vía COM con el adjunto.
-    Devuelve None si fue exitoso, o un mensaje de aviso si se usó fallback.
-    """
-    asunto = f"Documento Firmado: {nombre_doc}"
-    cuerpo = (
-        f"Estimado/a,\n\n"
-        f"Adjunto encontrará el documento '{nombre_doc}' con las páginas firmadas.\n\n"
-        f"Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
-    )
-
-    if sys.platform == "win32":
-        ok = _abrir_outlook_com(destinatario, asunto, cuerpo, pdf_path)
-        if ok:
-            return None  # éxito
-
-    # Fallback mailto: (sin adjunto)
-    _abrir_mailto(destinatario, asunto)
-    return (
-        "Se abrió el cliente de correo predeterminado.\n\n"
-        "No se pudo adjuntar el PDF automáticamente "
-        "(Outlook no respondio vía COM).\n"
-        f"Adjuntá manualmente el archivo:\n{pdf_path}"
-    )
 
 
 # ── Diálogo principal ─────────────────────────────────────────────────────────
@@ -228,7 +186,8 @@ class DialogoEnviarEmail(QDialog):
         lay.addSpacing(4)
 
         lbl_sub = QLabel(
-            f"Se abrirá Outlook con <b>{self.pdf_firmado.name}</b> adjuntado."
+            f"Se abrirá tu cliente de correo con el asunto prellenado.<br>"
+            f"Adjuntá <b>{self.pdf_firmado.name}</b> manualmente antes de enviar."
         )
         lbl_sub.setStyleSheet(f"color: {C_MUTED}; font-size: 12px;")
         lbl_sub.setWordWrap(True)
@@ -254,7 +213,7 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(self.lbl_error)
         lay.addSpacing(16)
 
-        # ─ Resumen
+        # ─ Resumen del documento
         lbl_resumen_titulo = QLabel("Resumen del documento")
         lbl_resumen_titulo.setStyleSheet("font-weight: 600;")
         lay.addWidget(lbl_resumen_titulo)
@@ -267,14 +226,26 @@ class DialogoEnviarEmail(QDialog):
             _construir_resumen(self.nombre_doc, self.paginas)
         )
         lay.addWidget(self.txt_resumen)
+        lay.addSpacing(14)
+
+        # ─ Ruta del PDF para copiar fácilmente
+        lbl_ruta_titulo = QLabel("Ruta del archivo")
+        lbl_ruta_titulo.setStyleSheet("font-weight: 600;")
+        lay.addWidget(lbl_ruta_titulo)
+        lay.addSpacing(6)
+
+        ruta_input = QLineEdit(str(self.pdf_firmado))
+        ruta_input.setReadOnly(True)
+        ruta_input.setToolTip("Copiá esta ruta para adjuntar el archivo en tu cliente de correo")
+        lay.addWidget(ruta_input)
         lay.addSpacing(20)
         lay.addWidget(self._sep())
         lay.addSpacing(14)
 
         # ─ Nota informativa
         lbl_nota = QLabel(
-            "ℹ️  Se abrirá Outlook con el PDF listo para enviar. "
-            "Solo tocá <b>Enviar</b> dentro de Outlook."
+            "ℹ️  Se abrirá tu cliente de correo predeterminado con el asunto y "
+            "destinatario listos. Adjuntá el archivo usando la ruta de arriba."
         )
         lbl_nota.setStyleSheet(f"font-size: 11px; color: {C_MUTED};")
         lbl_nota.setWordWrap(True)
@@ -293,8 +264,8 @@ class DialogoEnviarEmail(QDialog):
         fila_btns.addWidget(btn_cancelar)
         fila_btns.addStretch()
 
-        self.btn_abrir = QPushButton("✉️  Abrir Outlook")
-        self.btn_abrir.setMinimumWidth(180)
+        self.btn_abrir = QPushButton("✉️  Abrir cliente de correo")
+        self.btn_abrir.setMinimumWidth(200)
         self.btn_abrir.setEnabled(False)
         self.btn_abrir.clicked.connect(self._on_abrir)
         fila_btns.addWidget(self.btn_abrir)
@@ -327,14 +298,23 @@ class DialogoEnviarEmail(QDialog):
         self.btn_abrir.setText("Abriendo…")
         self.btn_abrir.setEnabled(False)
 
-        aviso = _enviar_con_cliente(
-            destinatario=destinatario,
-            pdf_path=self.pdf_firmado,
-            nombre_doc=self.nombre_doc,
+        asunto = f"Documento Firmado: {self.nombre_doc}"
+        cuerpo = (
+            f"Estimado/a,\n\n"
+            f"Adjunto encontrará el documento '{self.nombre_doc}' con las páginas firmadas.\n\n"
+            f"Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
         )
 
-        if aviso:
-            QMessageBox.warning(self, "Adjunto manual requerido", aviso)
+        try:
+            _abrir_mailto(destinatario, asunto, cuerpo)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error al abrir el correo",
+                f"No se pudo abrir el cliente de correo:\n\n{e}"
+            )
+            self.btn_abrir.setText("✉️  Abrir cliente de correo")
+            self.btn_abrir.setEnabled(True)
+            return
 
         self.accept()
 
