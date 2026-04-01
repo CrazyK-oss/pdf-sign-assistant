@@ -1,18 +1,19 @@
 # modules/fase2_print.py
-# Fase 2: Impresión de una página específica del PDF.
+# ROOT CAUSE CONFIRMADO:
+#   debug_fitz_output.png  -> normal  (fitz OK)
+#   debug_qt_argb32.png    -> normal  (QImage OK)
+#   impreso               -> morado  (QPainter->printer hace otra conversión interna)
 #
-# ROOT CAUSE DEL MORADO (definitivo):
-#   Format_RGB888 no es nativo en GDI (Windows).
-#   Qt convierte internamente RGB888 -> BGRA para GDI, y en esa
-#   conversión intercambia los canales R y B si el stride/alineación
-#   no es múltiplo de 4 bytes => resultado morado/violeta en papel.
-#   La solución es convertir la QImage a Format_ARGB32 (BGRA nativo
-#   de GDI/Win32) ANTES de llamar a painter.drawImage().
-#   Format_ARGB32 es el formato interno de GDI => cero conversión,
-#   cero intercambio de canales, colores exactos.
+# Qt en Windows, al llamar painter.drawImage() sobre un QPrinter,
+# pasa la QImage por un QPixmap intermedio interno para el backend
+# GDI, y esa conversión interna vuelve a intercambiar canales.
+#
+# SOLUCIÓN: convertir a QPixmap EXPLICITAMENTE nosotros antes de
+# dibujar, y usar drawPixmap(). QPixmap es el formato nativo del
+# display engine de Qt en Windows => cero conversiones intermedias.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
-from PyQt6.QtGui import QPainter, QImage
+from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QMessageBox
 
@@ -83,14 +84,12 @@ class ImpresionPagina:
             if doc:
                 doc.close()
 
-        # ── 4. fitz pixmap → QImage RGB888 → convertir a ARGB32 ────────────
+        # ── 4. fitz -> QImage -> QPixmap ─────────────────────────────────
         #
-        # GDI (Windows) usa BGRA (= ARGB32 en Qt) como formato nativo.
-        # Si le pasamos Format_RGB888 directamente, Qt hace una
-        # conversión interna con posible intercambio de canales R<->B
-        # => morado en papel.
-        # Convirtiendo a Format_ARGB32 ANTES de dibujar, Qt no necesita
-        # hacer ninguna conversión adicional => colores exactos.
+        # QPixmap es el formato nativo del display engine de Qt/Windows.
+        # drawPixmap() sobre QPrinter no hace conversiones intermedias.
+        # drawImage() sí las hace (pasa por un pixmap interno de GDI
+        # que vuelve a intercambiar canales R<->B => morado).
         img_rgb = QImage(
             bytes(pix.samples),
             pix.width,
@@ -98,12 +97,9 @@ class ImpresionPagina:
             pix.stride,
             QImage.Format.Format_RGB888,
         )
-        # Conversión explícita: RGB888 -> ARGB32 (BGRA nativo de GDI)
-        img = img_rgb.convertToFormat(QImage.Format.Format_ARGB32)
-        img.setDotsPerMeterX(int(PRINT_DPI / 0.0254))
-        img.setDotsPerMeterY(int(PRINT_DPI / 0.0254))
+        pixmap = QPixmap.fromImage(img_rgb)
 
-        # ── 5. Pintar ──────────────────────────────────────────────────
+        # ── 5. Pintar con drawPixmap ────────────────────────────────────
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.critical(
@@ -118,16 +114,16 @@ class ImpresionPagina:
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-            viewport = painter.viewport()
-            img_size = img.size().scaled(
+            viewport  = painter.viewport()
+            pm_size   = pixmap.size().scaled(
                 viewport.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
             )
-            x_off = (viewport.width()  - img_size.width())  // 2
-            y_off = (viewport.height() - img_size.height()) // 2
-            painter.drawImage(
-                QRect(x_off, y_off, img_size.width(), img_size.height()),
-                img,
+            x_off = (viewport.width()  - pm_size.width())  // 2
+            y_off = (viewport.height() - pm_size.height()) // 2
+            painter.drawPixmap(
+                QRect(x_off, y_off, pm_size.width(), pm_size.height()),
+                pixmap,
             )
         finally:
             painter.end()
