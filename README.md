@@ -1,6 +1,6 @@
 # PDF Sign Assistant
 
-> Aplicación de escritorio en Python + PyQt6 para automatizar el flujo completo de firma de documentos legales — diseñada para usuarios no técnicos con una interfaz clara y guiada.
+> Aplicación de escritorio en Python + PyQt6 para automatizar el flujo completo de firma de documentos legales — diseñada para usuarios no técnicos con una interfaz clara, guiada y con soporte de modo claro/oscuro.
 
 ---
 
@@ -17,8 +17,11 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 - 📄 **Vista previa en cuadrícula** — visualizá todas las páginas del PDF antes de elegir cuál firmar
 - 🖨️ **Impresión directa** — envía la página seleccionada a la impresora automáticamente
 - 🖼️ **Integración con escáner** — cargá o capturá la imagen escaneada de la página firmada
-- 🔄 **Reemplazo de página** — incrusta la firma escaneada de vuelta en el PDF original en la posición correcta
+- 🔄 **Reemplazo de página** — incrusta la firma escaneada de vuelta en el PDF original
 - 💾 **Lista de trabajos guardados** — historial de documentos procesados con fecha y hora; permite re-editar
+- ✉️ **Envío por correo SMTP** — enviá documentos firmados directamente desde la app
+- ⚙️ **Panel de ajustes** — configurá el correo emisor (servidor, puerto, credenciales) desde la UI, sin tocar archivos de configuración
+- 🌙 **Modo claro y oscuro** — alternás con un clic; el tema se aplica a toda la interfaz en tiempo real
 - 🔒 **Cancelación segura** — cancelá en cualquier etapa sin corromper el archivo original
 
 ---
@@ -36,6 +39,7 @@ Abrir PDF  →  Vista previa  →  Imprimir página  →  Escanear página firma
 | 3 | `fase2_print.py` | Envío de la página seleccionada a la impresora del sistema |
 | 4 | `fase3_scan.py` | Carga de la imagen escaneada/fotografiada de la página firmada |
 | 5 | `fase_guardar.py` | Vista previa del resultado, confirmación y guardado del PDF firmado |
+| 6 | `fase4_email.py` | Envío del PDF firmado por correo SMTP con adjunto |
 
 ---
 
@@ -47,16 +51,19 @@ pdf-sign-assistant/
 ├── config.json              # Credenciales SMTP y rutas de carpetas
 ├── config.example.env       # Plantilla de variables de entorno
 ├── requirements.txt         # Dependencias de Python
+├── pdf_sign_assistant.spec  # Configuración de PyInstaller para generar el .exe
 ├── pdfs_trabajo/            # Copias de trabajo temporales (auto-creado, gitignored)
 ├── pdfs_firmados/           # Documentos firmados finales (auto-creado, gitignored)
 └── modules/
     ├── __init__.py
-    ├── setup.py             # Inicialización y creación de carpetas
+    ├── setup.py             # Inicialización y rutas compatibles con PyInstaller
+    ├── theme.py             # Sistema de diseño: paletas light/dark, stylesheet, helpers de fuente
+    ├── settings.py          # Diálogo de ajustes de correo emisor (SMTP, credenciales)
     ├── fase1_preview.py     # Cuadrícula de miniaturas y selección de página
     ├── fase2_print.py       # Integración con la impresora del sistema
     ├── fase3_scan.py        # Carga de imagen y vista previa del escaneo
     ├── fase_guardar.py      # Lógica de reemplazo de página y guardado del PDF
-    └── fase4_email.py       # Envío por correo SMTP con adjunto PDF *(en desarrollo)*
+    └── fase4_email.py       # Envío por correo SMTP con adjunto PDF
 ```
 
 ---
@@ -69,8 +76,8 @@ pdf-sign-assistant/
   - **Linux**: `sudo apt-get install poppler-utils`
   - **macOS**: `brew install poppler`
 - **Escáner compatible** *(opcional — también se pueden cargar imágenes desde disco)*:
-  - Linux: `scanimage` vía `sane-utils`
   - Windows: WIA (integrado, compatible con HP LaserJet MFP)
+  - Linux: `scanimage` vía `sane-utils`
 
 ---
 
@@ -96,29 +103,24 @@ pip install -r requirements.txt
 
 ## Configuración
 
-### `config.json` — SMTP y rutas de carpetas
+### Opción A — Panel de Ajustes (recomendado)
 
-Editá este archivo con tus credenciales antes de ejecutar la app:
+Abrí la app y hacé clic en el botón **⚙** del header. Desde ahí podés configurar:
+- Proveedor SMTP (Gmail, Outlook, Yahoo, Zoho o Personalizado)
+- Correo emisor y contraseña de aplicación
+- Servidor y puerto SMTP
+
+Los cambios se guardan automáticamente en `config.json`.
+
+### Opción B — Editar `config.json` directamente
 
 ```json
 {
     "email_user": "tucorreo@dominio.com",
     "email_password": "tu_contraseña_de_aplicacion",
     "smtp_server": "smtp.gmail.com",
-    "smtp_port": 587,
-    "documents_folder": "./documents",
-    "scans_folder": "./scans",
-    "temp_folder": "./temp"
+    "smtp_port": 587
 }
-```
-
-### `.env` — sobreescritura por variables de entorno *(opcional)*
-
-Copiá `config.example.env` como `.env` y completá tus datos:
-
-```env
-EMAIL_REMITENTE=tucorreo@dominio.com
-EMAIL_PASSWORD=tu_contraseña_de_aplicacion
 ```
 
 > **Usuarios de Gmail:** Usá una *Contraseña de Aplicación*, no tu contraseña normal.  
@@ -132,7 +134,21 @@ EMAIL_PASSWORD=tu_contraseña_de_aplicacion
 python main.py
 ```
 
-La app crea automáticamente las carpetas `pdfs_trabajo/` y `pdfs_firmados/` al iniciarse por primera vez. No se requiere configuración adicional.
+La app crea automáticamente las carpetas `pdfs_trabajo/` y `pdfs_firmados/` al iniciarse.
+
+---
+
+## Generar ejecutable (.exe)
+
+```bash
+# Con el venv activo:
+pip install pyinstaller
+pyinstaller pdf_sign_assistant.spec
+```
+
+El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la carpeta completa**, nunca solo el `.exe`.
+
+> **Nota:** Si PyInstaller no encuentra `python3XX.dll`, el `.spec` incluye lógica para localizarla automáticamente usando `sys.base_exec_prefix` (funciona correctamente dentro de entornos virtuales).
 
 ---
 
@@ -152,17 +168,43 @@ La app crea automáticamente las carpetas `pdfs_trabajo/` y `pdfs_firmados/` al 
 
 ---
 
+## Changelog
+
+### v0.4 — Rediseño UI/UX + Modo Oscuro *(actual)*
+- **Sistema de diseño unificado** (`modules/theme.py`) con paletas `LIGHT` y `DARK` y stylesheet centralizado
+- **Toggle claro/oscuro** en el header — se aplica a toda la interfaz en tiempo real
+- **Fix crítico:** eliminado `QFormLayout.removeRow()` en `settings.py` que causaba crash al abrir el diálogo de ajustes
+- **Fix:** fuentes definidas con `font_pt()` (siempre `>= 1`) para eliminar el warning `QFont::setPointSize: Point size <= 0`
+- Rediseño visual completo: nuevos tokens de color, bordes, radios, scrollbars y estados hover/focus
+- Botones con jerarquía clara: primario / secundario / ghost
+
+### v0.3 — Panel de Ajustes de Correo
+- Nuevo módulo `modules/settings.py` con `DialogoAjustes`
+- Presets SMTP para Gmail, Outlook, Yahoo y Zoho
+- Toggle mostrar/ocultar contraseña
+- Validación de campos antes de guardar
+- Persistencia directa en `config.json`
+
+### v0.2 — Configuración PyInstaller
+- `pdf_sign_assistant.spec` para generar ejecutables Windows
+- Detección automática de `python3XX.dll` usando `sys.base_exec_prefix` (venv-safe)
+- Bundle de DLLs de pywin32 y datos de PyQt6/fitz
+
+### v0.1 — Flujo base
+- Flujo completo: abrir → previsualizar → imprimir → escanear → guardar → enviar
+- Lista de trabajos guardados con re-edición
+- Cancelación segura en cualquier etapa
+
+---
+
 ## Roadmap
 
-Mejoras planeadas para próximas versiones:
-
-- [ ] **Soporte para macOS** — integración nativa con impresoras y escáneres vía CUPS / ImageCapture
 - [ ] **Firma de múltiples páginas** — seleccionar y procesar varias páginas en una sola sesión
-- [ ] **Envío automático por correo** — pulir y estabilizar el flujo SMTP integrado en la app
 - [ ] **Procesamiento por lotes** — poner en cola varios PDFs y firmarlos secuencialmente
-- [ ] **Firma digital criptográfica** — incrustar firmas digitales sin necesidad de imprimir físicamente
-- [ ] **Panel de configuración en la UI** — gestionar SMTP, carpetas y escáner desde dentro de la app
-- [ ] **Exportar como ZIP** — empaquetar el PDF firmado junto con sus imágenes escaneadas para archivo
+- [ ] **Firma digital criptográfica** — incrustar firmas digitales sin necesidad de imprimir
+- [ ] **Exportar como ZIP** — empaquetar el PDF firmado junto con sus imágenes escaneadas
+- [ ] **Soporte macOS** — integración nativa con impresoras y escáneres vía CUPS / ImageCapture
+- [ ] **Persistencia del tema** — recordar la preferencia de tema claro/oscuro entre sesiones
 
 ---
 
@@ -172,4 +214,4 @@ Mejoras planeadas para próximas versiones:
 - Las copias de trabajo se guardan en `pdfs_trabajo/` y se limpian automáticamente al guardar o cancelar.
 - Los documentos firmados se persisten en `pdfs_firmados/` y aparecen en la ventana principal con su fecha de modificación.
 - Hacer doble clic en un documento guardado lo reabre para re-editar sin modificar el original.
-- Todos los errores se muestran como diálogos amigables al usuario; los tracebacks detallados se imprimen en consola para depuración.
+- Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.

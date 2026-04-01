@@ -2,23 +2,21 @@
 PDF Sign Assistant — main.py
 ============================================================
 Flujo principal:
-  1. Pantalla de inicio: botón "Abrir PDF" + lista de trabajos ya guardados.
-     — NO hay lista de PDFs al inicio, solo el botón para abrir uno.
-  2. Cuando hay un PDF en trabajo: panel activo siempre visible con botón
-     Cancelar prominente. El botón "Abrir PDF" se deshabilita.
+  1. Pantalla de inicio: botón "Abrir PDF" + lista de trabajos guardados.
+  2. Panel activo cuando hay un PDF en trabajo (cancelar / trabajar páginas).
   3. El panel activo delega a:
        fase1_preview → fase2_print → fase3_scan → fase_guardar
   4. Al confirmar se añade a la lista de guardados (con fecha/hora).
-  5. Doble‑clic en guardado → vuelve a abrir ese PDF para re‑editar.
+  5. Doble-clic en guardado → vuelve a abrir ese PDF para re-editar.
   6. Seleccionar guardado → habilita botones Editar y Enviar correo.
-  7. Botón ⚙ Ajustes en el header → abre DialogoAjustes (correo emisor).
+  7. Botón ⚙ → abre DialogoAjustes (correo emisor).
+  8. Botón ☀/🌙 → alterna entre modo claro y oscuro.
 
 NOTA PyInstaller:
-  - El bloque bootstrap (pip en runtime) fue eliminado — no funciona en
-    ejecutables congelados. Todas las dependencias deben estar instaladas
-    antes de construir con: pip install -r requirements.txt
-  - Las rutas de carpetas se resuelven vía modules.setup.get_base_dir()
-    para que funcionen tanto en modo script como en modo .exe congelado.
+  - Todas las dependencias deben estar instaladas antes de buildear:
+      pip install -r requirements.txt
+  - Las rutas se resuelven vía modules.setup.get_base_dir() para
+    compatibilidad entre modo script y modo .exe congelado.
 """
 
 import sys
@@ -27,28 +25,23 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-# ── Dotenv (opcional: no bloquea si el .env no existe) ──────────────────────
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
 except Exception:
     pass
 
-# ── Imports de PyQt6 (deben estar instalados; si faltan → error claro) ───────
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
     QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
-    QSpacerItem,
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont
 
-# ── Módulo propio de previsualizacion ────────────────────────────────────────
 from modules.fase1_preview import VistaPrevisualizacion
-
-# ── Rutas base (compatibles con PyInstaller frozen y modo script normal) ─────
 from modules.setup import get_base_dir
+from modules.theme import apply_theme, THEME, font_pt, current_mode
 
 BASE_DIR        = get_base_dir()
 CARPETA_TRABAJO = BASE_DIR / "pdfs_trabajo"
@@ -58,170 +51,7 @@ CARPETA_TRABAJO.mkdir(exist_ok=True)
 CARPETA_FIRMADO.mkdir(exist_ok=True)
 
 
-# ── Paleta de colores ─────────────────────────────────────────────────────────
-C_BG           = "#f7f6f2"
-C_SURFACE      = "#f3f0ec"
-C_SURFACE_2    = "#edeae5"
-C_BORDER       = "#d4d1ca"
-C_BORDER_SOFT  = "#e0ddd7"
-C_TEXT         = "#28251d"
-C_MUTED        = "#7a7974"
-C_FAINT        = "#bab9b4"
-C_PRIMARY      = "#01696f"
-C_PRIMARY_H    = "#0c4e54"
-C_PRIMARY_A    = "#0f3638"
-C_PRIMARY_HL   = "#cedcd8"
-C_DANGER       = "#a13544"
-C_DANGER_H     = "#782b33"
-C_SUCCESS      = "#437a22"
-C_SUCCESS_H    = "#2e5c10"
-C_SUCCESS_BG   = "#d4dfcc"
-C_ACTIVE_BG    = "#e4f0ee"
-C_ACTIVE_BD    = "#01696f"
-
-
-STYLESHEET = f"""
-QMainWindow, QWidget {{
-    background-color: {C_BG};
-    color: {C_TEXT};
-    font-family: 'Segoe UI', 'Inter', sans-serif;
-    font-size: 13px;
-}}
-
-/* ── Botón primario ── */
-QPushButton {{
-    background-color: {C_PRIMARY};
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 18px;
-    font-weight: 600;
-    font-size: 13px;
-}}
-QPushButton:hover   {{ background-color: {C_PRIMARY_H}; }}
-QPushButton:pressed {{ background-color: {C_PRIMARY_A}; }}
-QPushButton:disabled {{
-    background-color: {C_BORDER};
-    color: {C_MUTED};
-}}
-
-/* ── Botón peligro ── */
-QPushButton[danger="true"] {{
-    background-color: {C_DANGER};
-    color: white;
-}}
-QPushButton[danger="true"]:hover   {{ background-color: {C_DANGER_H}; }}
-QPushButton[danger="true"]:pressed {{ background-color: #521f24; }}
-
-/* ── Botón secundario (ghost) ── */
-QPushButton[secondary="true"] {{
-    background-color: transparent;
-    color: {C_PRIMARY};
-    border: 1.5px solid {C_PRIMARY};
-}}
-QPushButton[secondary="true"]:hover {{
-    background-color: {C_PRIMARY};
-    color: white;
-}}
-QPushButton[secondary="true"]:disabled {{
-    background-color: transparent;
-    color: {C_FAINT};
-    border-color: {C_BORDER_SOFT};
-}}
-
-/* ── Botón icono (ajustes) ── */
-QPushButton[icon_btn="true"] {{
-    background-color: transparent;
-    color: {C_MUTED};
-    border: 1px solid {C_BORDER};
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 16px;
-}}
-QPushButton[icon_btn="true"]:hover {{
-    background-color: {C_SURFACE_2};
-    color: {C_TEXT};
-    border-color: {C_PRIMARY};
-}}
-QPushButton[icon_btn="true"]:pressed {{
-    background-color: {C_PRIMARY_HL};
-}}
-
-/* ── Lista de guardados ── */
-QListWidget {{
-    background-color: {C_SURFACE};
-    border: 1px solid {C_BORDER};
-    border-radius: 8px;
-    padding: 4px;
-    outline: none;
-}}
-QListWidget::item {{
-    border-radius: 6px;
-    padding: 10px 12px;
-    margin: 2px 0;
-    color: {C_TEXT};
-}}
-QListWidget::item:hover {{
-    background-color: {C_SURFACE_2};
-}}
-QListWidget::item:selected {{
-    background-color: {C_PRIMARY_HL};
-    color: {C_TEXT};
-}}
-
-/* ── Panel de trabajo activo ── */
-QFrame#panelActivo {{
-    background-color: {C_ACTIVE_BG};
-    border: 1.5px solid {C_ACTIVE_BD};
-    border-radius: 10px;
-}}
-
-/* ── Panel vacío (sin guardados) ── */
-QFrame#panelVacio {{
-    background-color: {C_SURFACE};
-    border: 1px dashed {C_BORDER};
-    border-radius: 10px;
-}}
-
-/* ── Etiqueta de sección ── */
-QLabel#seccion {{
-    font-size: 11px;
-    font-weight: 700;
-    color: {C_MUTED};
-    letter-spacing: 1px;
-}}
-
-/* ── Nombre del PDF activo ── */
-QLabel#nombreActivo {{
-    font-size: 15px;
-    font-weight: 600;
-    color: {C_TEXT};
-}}
-
-/* ── Subtítulo de fecha ── */
-QLabel#fechaItem {{
-    font-size: 11px;
-    color: {C_MUTED};
-}}
-
-/* ── Status bar ── */
-QStatusBar {{
-    background-color: {C_SURFACE};
-    border-top: 1px solid {C_BORDER};
-    font-size: 12px;
-    color: {C_MUTED};
-    padding: 2px 8px;
-}}
-
-/* ── Separadores ── */
-QFrame[frameShape="4"], QFrame[frameShape="5"] {{
-    color: {C_BORDER};
-    max-height: 1px;
-}}
-"""
-
-
-# ── Utilidades ────────────────────────────────────────────────────────────────
+# ── Utilidades UI ─────────────────────────────────────────────────────────────
 
 def _cargar_config() -> dict:
     if CONFIG_PATH.exists():
@@ -233,29 +63,24 @@ def _cargar_config() -> dict:
     return {}
 
 
-def _btn(texto: str, *, danger=False, secondary=False, icon_btn=False,
-         min_w=0, height=36) -> QPushButton:
+def _btn(
+    texto: str, *,
+    danger=False, secondary=False, ghost=False,
+    min_w=0, height=36
+) -> QPushButton:
     b = QPushButton(texto)
     b.setMinimumHeight(height)
     if min_w:
         b.setMinimumWidth(min_w)
-    if danger:
-        b.setProperty("danger", "true")
-        b.style().unpolish(b)
-        b.style().polish(b)
-    if secondary:
-        b.setProperty("secondary", "true")
-        b.style().unpolish(b)
-        b.style().polish(b)
-    if icon_btn:
-        b.setProperty("icon_btn", "true")
+    prop = "danger" if danger else "secondary" if secondary else "ghost" if ghost else None
+    if prop:
+        b.setProperty(prop, "true")
         b.style().unpolish(b)
         b.style().polish(b)
     return b
 
 
 def _sep() -> QFrame:
-    """Separador horizontal fino."""
     s = QFrame()
     s.setFrameShape(QFrame.Shape.HLine)
     s.setFrameShadow(QFrame.Shadow.Plain)
@@ -265,31 +90,26 @@ def _sep() -> QFrame:
 # ── Panel PDF activo ──────────────────────────────────────────────────────────
 
 class PanelActivo(QFrame):
-    """
-    Panel siempre visible cuando hay un PDF en proceso.
-    Muestra: nombre del archivo · ruta · botón 'Trabajar páginas' · botón 'Cancelar'.
-    """
-
     def __init__(self, ruta: Path, on_trabajar, on_cancelar, parent=None):
         super().__init__(parent)
         self.setObjectName("panelActivo")
         self.ruta = ruta
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(10)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
 
         fila_info = QHBoxLayout()
-        fila_info.setSpacing(12)
+        fila_info.setSpacing(14)
 
         icono = QLabel("📄")
-        icono.setFont(QFont("Segoe UI Emoji", 22))
+        icono.setFont(QFont("Segoe UI Emoji", font_pt(22)))
         icono.setFixedWidth(36)
         icono.setAlignment(Qt.AlignmentFlag.AlignTop)
         fila_info.addWidget(icono)
 
         col_info = QVBoxLayout()
-        col_info.setSpacing(2)
+        col_info.setSpacing(3)
 
         lbl_tag = QLabel("PDF EN TRABAJO")
         lbl_tag.setObjectName("seccion")
@@ -308,19 +128,17 @@ class PanelActivo(QFrame):
         fila_info.addLayout(col_info)
         fila_info.addStretch()
         lay.addLayout(fila_info)
-
         lay.addWidget(_sep())
 
         fila_btns = QHBoxLayout()
-        fila_btns.setSpacing(8)
+        fila_btns.setSpacing(10)
 
-        btn_trabajar = _btn("Trabajar páginas →", min_w=200, height=40)
+        btn_trabajar = _btn("Trabajar páginas →", min_w=200, height=42)
         btn_trabajar.clicked.connect(on_trabajar)
         fila_btns.addWidget(btn_trabajar)
-
         fila_btns.addStretch()
 
-        btn_cancelar = _btn("✕  Cancelar / Salir del PDF", danger=True, height=40)
+        btn_cancelar = _btn("✕  Cancelar", danger=True, height=42)
         btn_cancelar.clicked.connect(on_cancelar)
         fila_btns.addWidget(btn_cancelar)
 
@@ -330,18 +148,14 @@ class PanelActivo(QFrame):
 # ── Item de guardados ─────────────────────────────────────────────────────────
 
 class ItemGuardado(QListWidgetItem):
-    """Item enriquecido para la lista de PDFs ya modificados."""
-
     def __init__(self, ruta: Path):
         super().__init__()
         self.ruta = ruta
-
         try:
-            ts = ruta.stat().st_mtime
+            ts    = ruta.stat().st_mtime
             fecha = datetime.fromtimestamp(ts).strftime("%d/%m/%Y  %H:%M")
         except Exception:
             fecha = ""
-
         self.setText(f"{ruta.name}\n{fecha}")
         self.setSizeHint(QSize(0, 58))
         self.setToolTip(str(ruta))
@@ -353,53 +167,66 @@ class VentanaPrincipal(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PDF Sign Assistant")
-        self.setMinimumSize(700, 580)
+        self.setMinimumSize(720, 600)
         self.config = _cargar_config()
         self._pdf_activo: Path | None = None
         self._pagina_activa: int = 0
-        self._vista_preview   = None
-        self._vista_escaneo   = None
-        self._vista_guardar   = None
+        self._vista_preview  = None
+        self._vista_escaneo  = None
+        self._vista_guardar  = None
         self._build_ui()
         self._cargar_guardados_existentes()
 
     # ── Construcción de UI ────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.setStyleSheet(STYLESHEET)
-
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(24, 20, 24, 16)
+        root.setContentsMargins(28, 22, 28, 16)
         root.setSpacing(0)
 
-        # Header
+        # ── Header ──────────────────────────────────────────────────────
         header = QHBoxLayout()
-        header.setSpacing(12)
+        header.setSpacing(10)
+
+        # Punto de color (acento visual)
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color: {THEME['primary']}; font-size: 10px;")
+        dot.setFixedWidth(14)
+        header.addWidget(dot)
+        self._dot = dot
 
         lbl_titulo = QLabel("PDF Sign Assistant")
-        lbl_titulo.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
+        lbl_titulo.setObjectName("appTitle")
         header.addWidget(lbl_titulo)
         header.addStretch()
 
-        # Botón ajustes ⚙
-        self.btn_ajustes = _btn("⚙", icon_btn=True, height=40)
+        # Toggle tema ☀/🌙
+        self.btn_tema = _btn("🌙", ghost=True, height=40)
+        self.btn_tema.setFixedWidth(44)
+        self.btn_tema.setToolTip("Cambiar a modo oscuro")
+        self.btn_tema.clicked.connect(self._toggle_tema)
+        header.addWidget(self.btn_tema)
+
+        # Ajustes ⚙
+        self.btn_ajustes = _btn("⚙", ghost=True, height=40)
         self.btn_ajustes.setFixedWidth(44)
         self.btn_ajustes.setToolTip("Ajustes — configurar correo emisor")
         self.btn_ajustes.clicked.connect(self._abrir_ajustes)
         header.addWidget(self.btn_ajustes)
 
-        self.btn_abrir = _btn("＋  Abrir PDF", min_w=140, height=40)
+        # Abrir PDF
+        self.btn_abrir = _btn("＋  Abrir PDF", min_w=150, height=40)
         self.btn_abrir.clicked.connect(self.abrir_pdf)
         header.addWidget(self.btn_abrir)
 
         root.addLayout(header)
-        root.addSpacing(14)
+        root.addSpacing(16)
         root.addWidget(_sep())
-        root.addSpacing(14)
+        root.addSpacing(16)
 
-        # Panel activo (oculto al inicio)
+        # ── Panel activo (oculto al inicio) ──────────────────────────────
         self.panel_activo_container = QWidget()
         self.panel_activo_container.setVisible(False)
         self._lay_panel = QVBoxLayout(self.panel_activo_container)
@@ -411,21 +238,20 @@ class VentanaPrincipal(QMainWindow):
         self._sep_panel.setVisible(False)
         root.addWidget(self._sep_panel)
 
-        # Sección: trabajos guardados
+        # ── Sección: guardados ───────────────────────────────────────────
         root.addSpacing(14)
-
-        hdr_guardados = QHBoxLayout()
-        lbl_guardados = QLabel("TRABAJOS GUARDADOS")
-        lbl_guardados.setObjectName("seccion")
-        hdr_guardados.addWidget(lbl_guardados)
-        hdr_guardados.addStretch()
+        hdr_guard = QHBoxLayout()
+        lbl_g = QLabel("TRABAJOS GUARDADOS")
+        lbl_g.setObjectName("seccion")
+        hdr_guard.addWidget(lbl_g)
+        hdr_guard.addStretch()
         self.lbl_contador = QLabel("")
         self.lbl_contador.setObjectName("fechaItem")
-        hdr_guardados.addWidget(self.lbl_contador)
-        root.addLayout(hdr_guardados)
+        hdr_guard.addWidget(self.lbl_contador)
+        root.addLayout(hdr_guard)
         root.addSpacing(8)
 
-        # Lista de guardados
+        # Lista
         self.lista_guardados = QListWidget()
         self.lista_guardados.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
@@ -442,56 +268,67 @@ class VentanaPrincipal(QMainWindow):
         self.panel_vacio = QFrame()
         self.panel_vacio.setObjectName("panelVacio")
         lay_vacio = QVBoxLayout(self.panel_vacio)
-        lay_vacio.setContentsMargins(24, 32, 24, 32)
-        lay_vacio.setSpacing(8)
+        lay_vacio.setContentsMargins(28, 36, 28, 36)
+        lay_vacio.setSpacing(10)
 
-        icono_vacio = QLabel("📋")
-        icono_vacio.setFont(QFont("Segoe UI Emoji", 28))
-        icono_vacio.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay_vacio.addWidget(icono_vacio)
+        icono_v = QLabel("📋")
+        icono_v.setFont(QFont("Segoe UI Emoji", font_pt(28)))
+        icono_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay_vacio.addWidget(icono_v)
 
-        lbl_vacio_titulo = QLabel("Sin documentos modificados todavía")
-        lbl_vacio_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_vacio_titulo.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {C_TEXT};"
-        )
-        lay_vacio.addWidget(lbl_vacio_titulo)
+        lbl_v_t = QLabel("Sin documentos modificados todavía")
+        lbl_v_t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_v_t.setStyleSheet(f"font-size: 14px; font-weight: 600;")
+        lay_vacio.addWidget(lbl_v_t)
 
-        lbl_vacio_sub = QLabel(
-            "Abrí un PDF con el botón de arriba para comenzar a trabajarlo.\n"
+        lbl_v_s = QLabel(
+            "Abrí un PDF con el botón de arriba para comenzar.\n"
             "Los documentos que guardes aparecerán aquí."
         )
-        lbl_vacio_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_vacio_sub.setStyleSheet(f"color: {C_MUTED}; font-size: 12px;")
-        lbl_vacio_sub.setWordWrap(True)
-        lay_vacio.addWidget(lbl_vacio_sub)
+        lbl_v_s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_v_s.setObjectName("fechaItem")
+        lbl_v_s.setWordWrap(True)
+        lay_vacio.addWidget(lbl_v_s)
 
         root.addWidget(self.panel_vacio)
 
-        # Barra de acciones sobre guardados
+        # ── Acciones sobre guardados ─────────────────────────────────────
         root.addSpacing(10)
-        fila_acciones = QHBoxLayout()
-        fila_acciones.setSpacing(8)
+        fila_acc = QHBoxLayout()
+        fila_acc.setSpacing(8)
 
-        self.btn_reabrir = _btn("✏️  Editar seleccionado",
-                                secondary=True, height=36)
+        self.btn_reabrir = _btn("✏️  Editar seleccionado", secondary=True, height=36)
         self.btn_reabrir.clicked.connect(self._reabrir_desde_boton)
         self.btn_reabrir.setEnabled(False)
-        fila_acciones.addWidget(self.btn_reabrir)
+        fila_acc.addWidget(self.btn_reabrir)
 
-        self.btn_email = _btn("✉️  Enviar por correo",
-                              secondary=True, height=36)
+        self.btn_email = _btn("✉️  Enviar por correo", secondary=True, height=36)
         self.btn_email.clicked.connect(self._enviar_correo)
         self.btn_email.setEnabled(False)
-        fila_acciones.addWidget(self.btn_email)
+        fila_acc.addWidget(self.btn_email)
 
-        fila_acciones.addStretch()
-        root.addLayout(fila_acciones)
+        fila_acc.addStretch()
+        root.addLayout(fila_acc)
 
         # Status bar
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Listo — abrí un PDF para comenzar.")
+
+    # ── Toggle tema ───────────────────────────────────────────────────────
+
+    def _toggle_tema(self):
+        nuevo = "dark" if current_mode() == "light" else "light"
+        apply_theme(QApplication.instance(), nuevo)
+        self.btn_tema.setText("☀️" if nuevo == "dark" else "🌙")
+        self.btn_tema.setToolTip(
+            "Cambiar a modo claro" if nuevo == "dark" else "Cambiar a modo oscuro"
+        )
+        # Actualizar punto de color con nueva paleta
+        self._dot.setStyleSheet(f"color: {THEME['primary']}; font-size: 10px;")
+        self.status.showMessage(
+            f"Tema {'oscuro' if nuevo == 'dark' else 'claro'} activado."
+        )
 
     # ── Estado vacío / lista ──────────────────────────────────────────────
 
@@ -500,15 +337,11 @@ class VentanaPrincipal(QMainWindow):
         tiene = count > 0
         self.lista_guardados.setVisible(tiene)
         self.panel_vacio.setVisible(not tiene)
-        if tiene:
-            self.lbl_contador.setText(
-                f"{count} documento{'s' if count > 1 else ''}"
-            )
-        else:
-            self.lbl_contador.setText("")
+        self.lbl_contador.setText(
+            f"{count} documento{'s' if count != 1 else ''}" if tiene else ""
+        )
 
     def _cargar_guardados_existentes(self):
-        """Precarga PDFs de pdfs_firmados/ al iniciar la app."""
         for pdf in sorted(CARPETA_FIRMADO.glob("*.pdf"),
                           key=lambda p: p.stat().st_mtime, reverse=True):
             self._agregar_item_guardado(pdf, scroll=False)
@@ -521,7 +354,7 @@ class VentanaPrincipal(QMainWindow):
             self.lista_guardados.scrollToItem(item)
         self._actualizar_estado_vacio()
 
-    # ── Selección de guardados ────────────────────────────────────────────
+    # ── Selección ─────────────────────────────────────────────────────────
 
     def _on_seleccion_guardado(self):
         tiene = bool(self.lista_guardados.selectedItems())
@@ -535,23 +368,17 @@ class VentanaPrincipal(QMainWindow):
     # ── Ajustes ───────────────────────────────────────────────────────────
 
     def _abrir_ajustes(self):
-        """Abre el diálogo de ajustes del correo emisor."""
         from modules.settings import DialogoAjustes
-        dialogo = DialogoAjustes(
-            config_path=CONFIG_PATH,
-            config=self.config,
-            parent=self,
-        )
-        if dialogo.exec():
-            # El diálogo guardó exitosamente — recargamos el config en memoria
-            self.config = dialogo.config
-            email = self.config.get("email_user", "")
-            self.status.showMessage(f"Ajustes guardados — correo emisor: {email}")
+        dlg = DialogoAjustes(config_path=CONFIG_PATH, config=self.config, parent=self)
+        if dlg.exec():
+            self.config = dlg.config
+            self.status.showMessage(
+                f"Ajustes guardados — correo: {self.config.get('email_user', '')}"
+            )
 
     # ── Abrir PDF ─────────────────────────────────────────────────────────
 
     def abrir_pdf(self):
-        """Abre un PDF nuevo. Solo permite uno a la vez."""
         if self._pdf_activo is not None:
             QMessageBox.information(
                 self, "PDF en proceso",
@@ -561,8 +388,7 @@ class VentanaPrincipal(QMainWindow):
             return
 
         ruta_str, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar PDF",
-            str(Path.home()), "Archivos PDF (*.pdf)"
+            self, "Seleccionar PDF", str(Path.home()), "Archivos PDF (*.pdf)"
         )
         if not ruta_str:
             return
@@ -570,9 +396,8 @@ class VentanaPrincipal(QMainWindow):
         origen  = Path(ruta_str)
         destino = CARPETA_TRABAJO / origen.name
         if destino.exists():
-            stem = origen.stem
-            ts   = datetime.now().strftime("%H%M%S")
-            destino = CARPETA_TRABAJO / f"{stem}_{ts}{origen.suffix}"
+            ts      = datetime.now().strftime("%H%M%S")
+            destino = CARPETA_TRABAJO / f"{origen.stem}_{ts}{origen.suffix}"
 
         try:
             shutil.copy2(origen, destino)
@@ -584,19 +409,13 @@ class VentanaPrincipal(QMainWindow):
         self.status.showMessage(f"PDF cargado: {destino.name}")
 
     def _activar_pdf(self, ruta: Path):
-        """Muestra el panel activo con el PDF cargado."""
         self._pdf_activo = ruta
-
         while self._lay_panel.count():
             w = self._lay_panel.takeAt(0).widget()
             if w:
                 w.deleteLater()
-
-        panel = PanelActivo(
-            ruta,
-            on_trabajar=self._iniciar_flujo_trabajo,
-            on_cancelar=self._cancelar_trabajo,
-        )
+        panel = PanelActivo(ruta, on_trabajar=self._iniciar_flujo_trabajo,
+                            on_cancelar=self._cancelar_trabajo)
         self._lay_panel.addWidget(panel)
         self.panel_activo_container.setVisible(True)
         self._sep_panel.setVisible(True)
@@ -615,20 +434,17 @@ class VentanaPrincipal(QMainWindow):
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
-
         try:
             if self._pdf_activo.exists():
                 self._pdf_activo.unlink()
         except Exception:
             pass
-
         self._cerrar_vistas_abiertas()
         self._desactivar_panel()
         self.status.showMessage("Trabajo cancelado.")
 
     def _desactivar_panel(self):
-        """Oculta el panel activo y libera el estado del PDF."""
-        self._pdf_activo = None
+        self._pdf_activo   = None
         self._pagina_activa = 0
         while self._lay_panel.count():
             w = self._lay_panel.takeAt(0).widget()
@@ -639,32 +455,22 @@ class VentanaPrincipal(QMainWindow):
         self.btn_abrir.setEnabled(True)
 
     def _cerrar_vistas_abiertas(self):
-        """Cierra y destruye cualquier ventana de fase que esté abierta."""
         for attr in ("_vista_preview", "_vista_escaneo", "_vista_guardar"):
-            vista = getattr(self, attr, None)
-            if vista is not None:
-                vista.close()
-                vista.deleteLater()
+            v = getattr(self, attr, None)
+            if v:
+                v.close()
+                v.deleteLater()
                 setattr(self, attr, None)
 
-    # ── Flujo de trabajo principal ────────────────────────────────────────
-    #
-    #   fase1_preview  →  _on_pagina_elegida
-    #   fase2_print    →  _abrir_escaneo
-    #   fase3_scan     →  _on_imagen_escaneada
-    #   fase_guardar   →  _on_guardado_listo
-    #
+    # ── Flujo de trabajo ──────────────────────────────────────────────────
 
     def _iniciar_flujo_trabajo(self):
-        """Fase 1 — abre el grid de páginas."""
         if self._pdf_activo is None:
             return
-
-        if self._vista_preview is not None:
+        if self._vista_preview:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
             self._vista_preview = None
-
         self._vista_preview = VistaPrevisualizacion(str(self._pdf_activo))
         self._vista_preview.setWindowTitle("PDF Sign Assistant — Seleccionar página")
         self._vista_preview.resize(960, 680)
@@ -673,40 +479,27 @@ class VentanaPrincipal(QMainWindow):
         self._vista_preview.show()
 
     def _on_pagina_elegida(self, num_pagina: int):
-        """Fase 2 — impresión directa."""
         self._pagina_activa = num_pagina
-
-        if self._vista_preview is not None:
+        if self._vista_preview:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
             self._vista_preview = None
-
         from modules.fase2_print import ImpresionPagina
-        imprimio = ImpresionPagina.imprimir(
-            str(self._pdf_activo), num_pagina, parent=self
-        )
-
+        imprimio = ImpresionPagina.imprimir(str(self._pdf_activo), num_pagina, parent=self)
         if not imprimio:
-            self.status.showMessage("Impresión cancelada — podés elegir otra página.")
+            self.status.showMessage("Impresión cancelada.")
             self._iniciar_flujo_trabajo()
             return
-
-        self.status.showMessage(
-            f"Página {num_pagina + 1} enviada a la impresora. Esperando escaneo…"
-        )
+        self.status.showMessage(f"Página {num_pagina + 1} enviada a impresora…")
         self._abrir_escaneo(num_pagina)
 
     def _abrir_escaneo(self, num_pagina: int):
-        """Fase 3 — vista de escaneo/carga de imagen."""
-        if self._vista_escaneo is not None:
+        if self._vista_escaneo:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
             self._vista_escaneo = None
-
         from modules.fase3_scan import VistaEscaneo
-        self._vista_escaneo = VistaEscaneo(
-            str(self._pdf_activo), num_pagina, parent=self
-        )
+        self._vista_escaneo = VistaEscaneo(str(self._pdf_activo), num_pagina, parent=self)
         self._vista_escaneo.setWindowTitle("PDF Sign Assistant — Escanear página")
         self._vista_escaneo.resize(820, 560)
         self._vista_escaneo.imagen_lista.connect(self._on_imagen_escaneada)
@@ -714,31 +507,22 @@ class VentanaPrincipal(QMainWindow):
         self._vista_escaneo.show()
 
     def _on_imagen_escaneada(self, ruta_imagen: str):
-        """Fase 4 — abre FaseGuardar con la imagen recibida."""
-        if self._vista_escaneo is not None:
+        if self._vista_escaneo:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
             self._vista_escaneo = None
-
-        self.status.showMessage(
-            f"Imagen lista — abriendo confirmación de guardado…"
-        )
         self._abrir_guardar(ruta_imagen)
 
     def _abrir_guardar(self, ruta_imagen: str):
-        """Fase 4 — vista de confirmación y guardado del PDF."""
-        if self._vista_guardar is not None:
+        if self._vista_guardar:
             self._vista_guardar.close()
             self._vista_guardar.deleteLater()
             self._vista_guardar = None
-
         from modules.fase_guardar import FaseGuardar
         self._vista_guardar = FaseGuardar(
-            ruta_pdf        = self._pdf_activo,
-            ruta_imagen     = ruta_imagen,
-            num_pagina      = self._pagina_activa,
-            carpeta_firmados= CARPETA_FIRMADO,
-            parent          = self,
+            ruta_pdf=self._pdf_activo, ruta_imagen=ruta_imagen,
+            num_pagina=self._pagina_activa, carpeta_firmados=CARPETA_FIRMADO,
+            parent=self,
         )
         self._vista_guardar.setWindowTitle("PDF Sign Assistant — Guardar documento")
         self._vista_guardar.resize(780, 520)
@@ -747,57 +531,43 @@ class VentanaPrincipal(QMainWindow):
         self._vista_guardar.show()
 
     def _on_guardado_listo(self, ruta_final):
-        """El PDF fue guardado correctamente."""
-        if self._vista_guardar is not None:
+        if self._vista_guardar:
             self._vista_guardar.close()
             self._vista_guardar.deleteLater()
             self._vista_guardar = None
-
-        # Limpiar el PDF de trabajo
         try:
             if self._pdf_activo and self._pdf_activo.exists():
                 self._pdf_activo.unlink()
         except Exception:
             pass
-
         nombre = Path(ruta_final).name
         self._desactivar_panel()
         self._agregar_item_guardado(Path(ruta_final))
         self.status.showMessage(f"✅  Guardado: {nombre}")
-
-        QMessageBox.information(
-            self,
-            "¡Listo!",
-            f"Documento guardado exitosamente:\n{ruta_final}"
-        )
+        QMessageBox.information(self, "¡Listo!", f"Documento guardado:\n{ruta_final}")
 
     def _on_guardar_cancelado(self):
-        """Usuario presionó '← Volver al escaneo' en FaseGuardar."""
-        if self._vista_guardar is not None:
+        if self._vista_guardar:
             self._vista_guardar.close()
             self._vista_guardar.deleteLater()
             self._vista_guardar = None
-
-        self.status.showMessage("Volviendo al escaneo…")
         self._abrir_escaneo(self._pagina_activa)
 
     def _on_escaneo_cancelado(self):
-        """Usuario presionó '← Volver a páginas' en VistaEscaneo."""
-        if self._vista_escaneo is not None:
+        if self._vista_escaneo:
             self._vista_escaneo.close()
             self._vista_escaneo.deleteLater()
             self._vista_escaneo = None
-        self.status.showMessage("Escaneo cancelado — volviendo al grid de páginas.")
         self._iniciar_flujo_trabajo()
 
     def _on_preview_cancelado(self):
-        if self._vista_preview is not None:
+        if self._vista_preview:
             self._vista_preview.close()
             self._vista_preview.deleteLater()
             self._vista_preview = None
         self.status.showMessage("Vista de páginas cerrada.")
 
-    # ── Re‑abrir guardado ─────────────────────────────────────────────────
+    # ── Re-abrir guardado ─────────────────────────────────────────────────
 
     def _reabrir_desde_boton(self):
         item = self._item_seleccionado()
@@ -806,69 +576,51 @@ class VentanaPrincipal(QMainWindow):
 
     def _reabrir_guardado(self, item: "ItemGuardado"):
         if self._pdf_activo is not None:
-            QMessageBox.information(
-                self, "PDF en proceso",
-                "Hay un trabajo activo en curso.\n"
-                "Cancelá el trabajo actual antes de abrir otro."
-            )
+            QMessageBox.information(self, "PDF en proceso",
+                "Cancelá el trabajo actual antes de abrir otro.")
             return
-
         ruta = item.ruta
         if not ruta.exists():
-            QMessageBox.warning(
-                self, "Archivo no encontrado",
-                f"El archivo ya no existe:\n{ruta}"
-            )
+            QMessageBox.warning(self, "Archivo no encontrado",
+                f"El archivo ya no existe:\n{ruta}")
             self.lista_guardados.takeItem(self.lista_guardados.row(item))
             self._actualizar_estado_vacio()
             return
-
         copia = CARPETA_TRABAJO / f"reedit_{ruta.name}"
         try:
             shutil.copy2(ruta, copia)
         except Exception as e:
             QMessageBox.critical(self, "Error al copiar", str(e))
             return
-
         self._activar_pdf(copia)
-        self.status.showMessage(f"Re‑editando: {ruta.name}")
+        self.status.showMessage(f"Re-editando: {ruta.name}")
 
-    # ── Enviar por correo ─────────────────────────────────────────────────
+    # ── Enviar correo ─────────────────────────────────────────────────────
 
     def _enviar_correo(self):
         item = self._item_seleccionado()
         if not item:
             return
-
         if not item.ruta.exists():
-            QMessageBox.warning(
-                self, "Archivo no encontrado",
-                f"No se encontró:\n{item.ruta}"
-            )
+            QMessageBox.warning(self, "Archivo no encontrado", f"No se encontró:\n{item.ruta}")
             return
-
         try:
             from modules.fase4_email import enviar_documento
         except ImportError as e:
             QMessageBox.critical(self, "Error de módulo", str(e))
             return
-
         enviar_documento(
-            pdf_firmado = item.ruta,
-            config      = self.config,
-            paginas     = [0],
-            nombre_doc  = item.ruta.stem,
+            pdf_firmado=item.ruta, config=self.config,
+            paginas=[0], nombre_doc=item.ruta.stem,
         )
-        self.status.showMessage(
-            f"Flujo de envío iniciado para: {item.ruta.name}"
-        )
+        self.status.showMessage(f"Flujo de envío iniciado: {item.ruta.name}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
     app = QApplication(sys.argv)
-    app.setFont(QFont("Segoe UI", 10))
+    apply_theme(app, "light")   # tema inicial claro; el usuario puede cambiarlo con 🌙
     ventana = VentanaPrincipal()
     ventana.show()
     sys.exit(app.exec())
