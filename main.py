@@ -11,6 +11,7 @@ Flujo principal:
   4. Al confirmar se añade a la lista de guardados (con fecha/hora).
   5. Doble‑clic en guardado → vuelve a abrir ese PDF para re‑editar.
   6. Seleccionar guardado → habilita botones Editar y Enviar correo.
+  7. Botón ⚙ Ajustes en el header → abre DialogoAjustes (correo emisor).
 """
 
 import sys
@@ -136,6 +137,24 @@ QPushButton[secondary="true"]:disabled {{
     border-color: {C_BORDER_SOFT};
 }}
 
+/* ── Botón icono (ajustes) ── */
+QPushButton[icon_btn="true"] {{
+    background-color: transparent;
+    color: {C_MUTED};
+    border: 1px solid {C_BORDER};
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 16px;
+}}
+QPushButton[icon_btn="true"]:hover {{
+    background-color: {C_SURFACE_2};
+    color: {C_TEXT};
+    border-color: {C_PRIMARY};
+}}
+QPushButton[icon_btn="true"]:pressed {{
+    background-color: {C_PRIMARY_HL};
+}}
+
 /* ── Lista de guardados ── */
 QListWidget {{
     background-color: {C_SURFACE};
@@ -222,7 +241,7 @@ def _cargar_config() -> dict:
     return {}
 
 
-def _btn(texto: str, *, danger=False, secondary=False,
+def _btn(texto: str, *, danger=False, secondary=False, icon_btn=False,
          min_w=0, height=36) -> QPushButton:
     b = QPushButton(texto)
     b.setMinimumHeight(height)
@@ -234,6 +253,10 @@ def _btn(texto: str, *, danger=False, secondary=False,
         b.style().polish(b)
     if secondary:
         b.setProperty("secondary", "true")
+        b.style().unpolish(b)
+        b.style().polish(b)
+    if icon_btn:
+        b.setProperty("icon_btn", "true")
         b.style().unpolish(b)
         b.style().polish(b)
     return b
@@ -367,6 +390,13 @@ class VentanaPrincipal(QMainWindow):
         lbl_titulo.setFont(QFont("Segoe UI", 17, QFont.Weight.Bold))
         header.addWidget(lbl_titulo)
         header.addStretch()
+
+        # Botón ajustes ⚙
+        self.btn_ajustes = _btn("⚙", icon_btn=True, height=40)
+        self.btn_ajustes.setFixedWidth(44)
+        self.btn_ajustes.setToolTip("Ajustes — configurar correo emisor")
+        self.btn_ajustes.clicked.connect(self._abrir_ajustes)
+        header.addWidget(self.btn_ajustes)
 
         self.btn_abrir = _btn("＋  Abrir PDF", min_w=140, height=40)
         self.btn_abrir.clicked.connect(self.abrir_pdf)
@@ -509,6 +539,22 @@ class VentanaPrincipal(QMainWindow):
     def _item_seleccionado(self) -> "ItemGuardado | None":
         items = self.lista_guardados.selectedItems()
         return items[0] if items else None
+
+    # ── Ajustes ───────────────────────────────────────────────────────────
+
+    def _abrir_ajustes(self):
+        """Abre el diálogo de ajustes del correo emisor."""
+        from modules.settings import DialogoAjustes
+        dialogo = DialogoAjustes(
+            config_path=CONFIG_PATH,
+            config=self.config,
+            parent=self,
+        )
+        if dialogo.exec():
+            # El diálogo guardó exitosamente — recargamos el config en memoria
+            self.config = dialogo.config
+            email = self.config.get("email_user", "")
+            self.status.showMessage(f"Ajustes guardados — correo emisor: {email}")
 
     # ── Abrir PDF ─────────────────────────────────────────────────────────
 
