@@ -1,23 +1,15 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
 #
-# DIAGNÓSTICO FINAL CONFIRMADO:
-#   - El PDF tiene R=0 G=0 B=0 para el texto negro. fitz lo renderiza
-#     perfecto. El morado lo genera el driver HP Smart Tank al procesar
-#     el bitmap por GDI con ICM activado.
-#
-#   - min(printer.resolution(), 300) NO funciona porque resolution()
-#     es solo lectura después del diálogo; Qt usa el valor del driver
-#     (600 DPI) para el viewport interno aunque nosotros rend. a 300.
-#     Resultado: GDI escala la imagen de 300 a 600 DPI internamente
-#     y el pipeline ICM se sigue activando.
-#
-# SOLUCIÓN DEFINITIVA:
-#   printer.setResolution(150) ANTES de QPrintDialog.
-#   Esto le dice a Qt que negocie 150 DPI con el driver, de forma que
-#   el viewport interno de QPainter queda a 150 DPI y GDI no activa
-#   su pipeline de alta resolución / ICM.
-#   150 DPI es más que suficiente para documentos de texto/firmas.
+# ROOT CAUSE DEL MORADO (definitivo):
+#   Format_RGB888 no es nativo en GDI (Windows).
+#   Qt convierte internamente RGB888 -> BGRA para GDI, y en esa
+#   conversión intercambia los canales R y B si el stride/alineación
+#   no es múltiplo de 4 bytes => resultado morado/violeta en papel.
+#   La solución es convertir la QImage a Format_ARGB32 (BGRA nativo
+#   de GDI/Win32) ANTES de llamar a painter.drawImage().
+#   Format_ARGB32 es el formato interno de GDI => cero conversión,
+#   cero intercambio de canales, colores exactos.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage
@@ -30,8 +22,6 @@ try:
 except ImportError:
     PYMUPDF_OK = False
 
-# DPI fijo para impresión. 150 evita el pipeline ICM del driver HP.
-# Calidad: A4 a 150 DPI = 1240x1754 px, perfecta para texto y firmas.
 PRINT_DPI = 150
 
 
@@ -49,12 +39,7 @@ class ImpresionPagina:
             )
             return False
 
-        # ── 1. Configurar QPrinter con DPI fijo ANTES del diálogo ──────────
-        #
-        # setResolution() debe llamarse ANTES de QPrintDialog para que
-        # Qt negocie ese DPI con el driver desde el inicio.
-        # Si se llama después, el driver ya fijó su DPI interno (600)
-        # y el setResolution queda ignorado.
+        # ── 1. Configurar QPrinter ──────────────────────────────────────
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setResolution(PRINT_DPI)
         printer.setColorMode(QPrinter.ColorMode.Color)
@@ -76,7 +61,7 @@ class ImpresionPagina:
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return False
 
-        # ── 3. Renderizar al DPI fijo ───────────────────────────────────
+        # ── 3. Renderizar con fitz ──────────────────────────────────────
         doc = None
         try:
             doc    = fitz.open(ruta_pdf)
@@ -98,14 +83,23 @@ class ImpresionPagina:
             if doc:
                 doc.close()
 
-        # ── 4. fitz pixmap → QImage RGB888 ─────────────────────────────
-        img = QImage(
+        # ── 4. fitz pixmap → QImage RGB888 → convertir a ARGB32 ────────────
+        #
+        # GDI (Windows) usa BGRA (= ARGB32 en Qt) como formato nativo.
+        # Si le pasamos Format_RGB888 directamente, Qt hace una
+        # conversión interna con posible intercambio de canales R<->B
+        # => morado en papel.
+        # Convirtiendo a Format_ARGB32 ANTES de dibujar, Qt no necesita
+        # hacer ninguna conversión adicional => colores exactos.
+        img_rgb = QImage(
             bytes(pix.samples),
             pix.width,
             pix.height,
             pix.stride,
             QImage.Format.Format_RGB888,
         )
+        # Conversión explícita: RGB888 -> ARGB32 (BGRA nativo de GDI)
+        img = img_rgb.convertToFormat(QImage.Format.Format_ARGB32)
         img.setDotsPerMeterX(int(PRINT_DPI / 0.0254))
         img.setDotsPerMeterY(int(PRINT_DPI / 0.0254))
 
@@ -124,8 +118,8 @@ class ImpresionPagina:
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-            viewport  = painter.viewport()
-            img_size  = img.size().scaled(
+            viewport = painter.viewport()
+            img_size = img.size().scaled(
                 viewport.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
             )
