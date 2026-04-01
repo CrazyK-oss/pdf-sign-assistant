@@ -1,29 +1,27 @@
 # modules/fase2_print.py
 # Fase 2: Impresión de una página específica del PDF.
 #
-# Esta versión incluye:
+# Flujo:
+#   1. Detecta automáticamente si la página tiene color real o es B/N.
+#   2. Configura QPrinter (GrayScale / Color) según detección.
+#   3. Abre el diálogo NATIVO de Windows (QPrintDialog) — que ya incluye
+#      el thumbnail de vista previa integrado en el panel derecho.
+#   4. Renderiza al DPI real de la impresora y pinta con QPainter.
 #
-# 1. VISTA PREVIA real con QPrintPreviewDialog antes de imprimir.
-#    - Muestra exactamente lo que se va a imprimir, a escala.
-#    - El usuario puede cambiar la impresora, orientación y copias
-#      desde el mismo diálogo sin cerrar.
-#
-# 2. MODO DE COLOR UNIVERSAL – auto-detección:
-#    - Si el PDF tiene contenido a color → imprime en Color (RGB).
-#    - Si el PDF es completamente blanco/negro → imprime en GrayScale
-#      (solo tinta K), evitando la mezcla CMYK que produce el café/sepia
-#      en impresoras de inyección de tinta.
-#    - El usuario puede forzar el modo manualmente desde el diálogo.
-#
-# 3. setFullPage(True): área física total, sin márgenes del driver.
-# 4. Zoom 1:1 con DPI real de la impresora.
-# 5. SmoothPixmapTransform + Antialiasing para escala bicúbica.
-# 6. doc.close() en finally para liberar memoria.
+# Fix color (café / morado):
+#   El problema razíz es que QPainter sobre QPrinter necesita recibir
+#   Format_ARGB32 (el formato interno nativo de Qt) para que no ocurra
+#   ninguna re-interpretación de canales por parte del driver.
+#   Usar Format_RGB888 o Format_Grayscale8 directamente hace que algunos
+#   drivers (HP, Canon) reinterpreten los bytes como CMYK o BGR,
+#   produciendo el tono café / morado.
+#   Solución: renderizar con fitz.csRGB y convertir a Format_ARGB32
+#   antes de pintar. Para documentos B/N le pedimos a Qt que convierta
+#   al vuelo con convertToFormat — así el painter siempre ve ARGB32.
 
-import math
-from PyQt6.QtPrintSupport import QPrinter, QPrintPreviewDialog
+from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtGui import QPainter, QImage
-from PyQt6.QtCore import Qt, QRect, QSize
+from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QMessageBox
 
 try:
@@ -34,124 +32,32 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  Detección de contenido a color
+#  Detección de color
 # ─────────────────────────────────────────────────────────────────────────
 
-def _pagina_tiene_color(pagina: "fitz.Page") -> bool:
+def _pagina_tiene_color(pagina) -> bool:
     """
-    Retorna True si la página contiene píxeles con saturación de color
-    significativa (no solo grises). Usa un render a baja resolución (72 DPI)
-    para ser rápido.
-
-    Algoritmo:
-    - Renderiza en RGB a 72 DPI (imagen pequeña ∼ 595×842 para A4).
-    - Muestrea hasta 2000 píxeles al azar.
-    - Considera color si alguno tiene diferencia máxima entre canales R/G/B
-      mayor a 20 (umbral para ignorar leves variaciones de perfil de color).
+    Devuelve True si la página tiene algún píxel con saturación visible.
+    Muestrea 2000 píxeles a 72 DPI (imagen mínima, muy rápido).
+    Umbral de 20 para ignorar leves variaciones de perfil ICC.
     """
     try:
         pix = pagina.get_pixmap(
-            matrix=fitz.Matrix(1, 1),  # 72 DPI, rápido
+            matrix=fitz.Matrix(1, 1),
             colorspace=fitz.csRGB,
             alpha=False,
         )
-        samples = pix.samples  # bytes: R G B R G B ...
-        n_pixels = pix.width * pix.height
-        step = max(1, n_pixels // 2000)  # muestreo
-
-        for i in range(0, n_pixels, step):
-            offset = i * 3
-            r = samples[offset]
-            g = samples[offset + 1]
-            b = samples[offset + 2]
-            if max(r, g, b) - min(r, g, b) > 20:  # umbral de saturación
+        samples = pix.samples
+        total   = pix.width * pix.height
+        step    = max(1, total // 2000)
+        for i in range(0, total, step):
+            o = i * 3
+            if max(samples[o], samples[o+1], samples[o+2]) \
+             - min(samples[o], samples[o+1], samples[o+2]) > 20:
                 return True
         return False
     except Exception:
-        return True  # ante la duda, usa color
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Función de renderizado (usada tanto para preview como para imprimir)
-# ─────────────────────────────────────────────────────────────────────────
-
-def _renderizar_pagina(ruta_pdf: str, num_pagina: int, dpi: int,
-                       use_gray: bool) -> "QImage | None":
-    """
-    Renderiza una página del PDF y devuelve una QImage lista para pintar.
-
-    Args:
-        ruta_pdf:    Ruta al PDF.
-        num_pagina:  Índice 0-based.
-        dpi:         Resolución de renderizado.
-        use_gray:    True → escala de grises (solo tinta K);
-                     False → color RGB completo.
-
-    Returns:
-        QImage o None si hubo error.
-    """
-    if not PYMUPDF_OK:
-        return None
-
-    # Cap de seguridad: evita imágenes de >250 MP que saturan la RAM.
-    # A 600 DPI A4 → ~34 MP. A 1200 DPI → ~136 MP. Cap en 600 DPI para preview.
-    dpi = min(dpi, 600)
-
-    doc = None
-    try:
-        doc = fitz.open(ruta_pdf)
-        pagina = doc[num_pagina]
-
-        zoom = dpi / 72.0
-        mat  = fitz.Matrix(zoom, zoom)
-
-        if use_gray:
-            pix = pagina.get_pixmap(
-                matrix=mat,
-                colorspace=fitz.csGRAY,
-                alpha=False,
-            )
-            fmt = QImage.Format.Format_Grayscale8
-        else:
-            pix = pagina.get_pixmap(
-                matrix=mat,
-                colorspace=fitz.csRGB,
-                alpha=False,
-            )
-            fmt = QImage.Format.Format_RGB888
-
-        img = QImage(
-            bytes(pix.samples),
-            pix.width,
-            pix.height,
-            pix.stride,
-            fmt,
-        )
-        img.setDotsPerMeterX(int(dpi / 0.0254))
-        img.setDotsPerMeterY(int(dpi / 0.0254))
-        return img
-
-    except Exception:
-        return None
-    finally:
-        if doc:
-            doc.close()
-
-
-def _pintar_en_dispositivo(painter: QPainter, img: "QImage"):
-    """Escala la imagen manteniendo aspecto y la centra en el viewport."""
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-    viewport = painter.viewport()
-    img_size = img.size().scaled(
-        viewport.size(),
-        Qt.AspectRatioMode.KeepAspectRatio,
-    )
-    x_off = (viewport.width()  - img_size.width())  // 2
-    y_off = (viewport.height() - img_size.height()) // 2
-    dest  = QRect(x_off, y_off, img_size.width(), img_size.height())
-    painter.drawImage(dest, img)
+        return True   # ante la duda: color
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -161,105 +67,164 @@ def _pintar_en_dispositivo(painter: QPainter, img: "QImage"):
 class ImpresionPagina:
     """
     Clase utilitaria estática.
-    Uso desde fase1_preview.py:
 
+    Uso:
         from modules.fase2_print import ImpresionPagina
-        imprimio = ImpresionPagina.imprimir(ruta_pdf, num_pagina, parent=self)
-        if imprimio:
+        if ImpresionPagina.imprimir(ruta_pdf, num_pagina, parent=self):
             self.pagina_seleccionada.emit(num_pagina)
     """
 
     @staticmethod
     def imprimir(ruta_pdf: str, num_pagina: int, parent=None) -> bool:
         """
-        Muestra una vista previa (QPrintPreviewDialog) y luego imprime.
+        Abre el diálogo de impresión nativo de Windows con thumbnail
+        integrado, y pinta la página del PDF con color correcto.
 
-        Flujo:
-          1. Detecta automáticamente si la página tiene color o es B/N.
-          2. Configura QPrinter con el modo correcto (Color o GrayScale).
-          3. Abre QPrintPreviewDialog con render en tiempo real.
-          4. Al aceptar, imprime al DPI real de la impresora.
-
-        Returns:
-            True si el usuario confirmó e imprimió, False si canceló.
+        Returns True si el usuario confirmó e imprimió.
         """
         if not PYMUPDF_OK:
             QMessageBox.critical(
-                parent,
-                "Dependencia faltante",
+                parent, "Dependencia faltante",
                 "PyMuPDF no está instalado.\n\n"
                 "Instálalo con:\n    pip install pymupdf\n\n"
                 "Luego reinicia la aplicación."
             )
             return False
 
-        # ── 1. Detectar modo de color automáticamente ─────────────────────
-        use_gray = True  # defecto seguro
+        # ── 1. Detectar color ─────────────────────────────────────────────
+        tiene_color = True
         try:
             with fitz.open(ruta_pdf) as _doc:
-                use_gray = not _pagina_tiene_color(_doc[num_pagina])
+                tiene_color = _pagina_tiene_color(_doc[num_pagina])
         except Exception:
             pass
 
         # ── 2. Configurar QPrinter ─────────────────────────────────────────
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setColorMode(
-            QPrinter.ColorMode.GrayScale if use_gray
-            else QPrinter.ColorMode.Color
+            QPrinter.ColorMode.Color if tiene_color
+            else QPrinter.ColorMode.GrayScale
         )
         printer.setFullPage(True)
 
-        # Orientación automática según la página
         try:
             with fitz.open(ruta_pdf) as _doc:
                 rect = _doc[num_pagina].rect
-                if rect.width > rect.height:
-                    printer.setPageOrientation(QPrinter.Orientation.Landscape)
-                else:
-                    printer.setPageOrientation(QPrinter.Orientation.Portrait)
+                printer.setPageOrientation(
+                    QPrinter.Orientation.Landscape if rect.width > rect.height
+                    else QPrinter.Orientation.Portrait
+                )
         except Exception:
             pass
 
-        # ── 3. Vista previa con QPrintPreviewDialog ──────────────────────
+        # ── 3. Diálogo nativo de Windows ─────────────────────────────────
         #
-        # paintRequested se emite:
-        #   a) Al abrir el diálogo (render inicial de la preview).
-        #   b) Al cambiar configuración en el diálogo (re-render automático).
-        #   c) Al confirmar “Imprimir” (render final al DPI real).
+        # QPrintDialog es el diálogo nativo de Windows: incluye el panel
+        # de configuración a la izquierda Y el thumbnail de vista previa
+        # a la derecha de forma nativa (es el sistema el que lo genera,
+        # no la aplicación). No necesitamos ningún diálogo extra.
+        dialog = QPrintDialog(printer, parent)
+        dialog.setWindowTitle(f"Imprimir — Página {num_pagina + 1}")
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return False
+
+        # ── 4. Renderizar al DPI real de la impresora ─────────────────────
+        dpi = printer.resolution()
+        if dpi <= 0:
+            dpi = 300
+        dpi = min(dpi, 600)  # cap de seguridad RAM
+
+        doc = None
+        try:
+            doc  = fitz.open(ruta_pdf)
+            pag  = doc[num_pagina]
+            zoom = dpi / 72.0
+            mat  = fitz.Matrix(zoom, zoom)
+
+            # Siempre renderizamos en RGB con fitz — es el único colorspace
+            # que fitz garantiza 1:1 con el PDF. El manejo de grises lo
+            # hacemos en el paso de conversión QImage (ver abajo).
+            pix = pag.get_pixmap(
+                matrix=mat,
+                colorspace=fitz.csRGB,
+                alpha=False,
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                parent, "Error al procesar el PDF",
+                f"No se pudo renderizar la página:\n\n{e}"
+            )
+            return False
+        finally:
+            if doc:
+                doc.close()
+
+        # ── 5. Convertir a QImage ARGB32 ──────────────────────────────────
         #
-        # En cada llamada leemos printer.resolution() porque puede haber
-        # cambiado si el usuario eligió otra impresora desde el diálogo.
-        # Para la preview usamos máx 150 DPI para que sea instantánea;
-        # el render final usa el DPI real sin límite (solo el cap de 600).
-        _imprimio = [False]  # lista mutable para capturar desde el closure
+        # Por qué ARGB32 y no RGB888 / Grayscale8:
+        #
+        # QPainter sobre QPrinter en Windows delega en el driver de la
+        # impresora a través de GDI / GDI+. GDI+ espera internamente que
+        # los datos de imagen lleguen en formato BGRA (32 bpp). Qt mapea
+        # Format_ARGB32 a BGRA32 en GDI+, por eso es el único formato
+        # que se transfiere sin ningún canal de conversión adicional.
+        #
+        # Format_RGB888 hace que GDI+ reinterprete los 3 bytes como 4
+        # (con padding incorrecto en algunos drivers HP/Canon), lo que
+        # desplaza los canales R↔G↔B → aparece el tono morado o café.
+        #
+        # Pasos:
+        #   a) Construir QImage en Format_RGB888 (los bytes de fitz son RGB).
+        #   b) Convertir a Format_ARGB32 con convertToFormat — Qt hace
+        #      la conversión internamente con alpha=255 (opaco).
+        #      Si el documento es B/N, hacemos la conversión en dos pasos:
+        #      RGB888 → Grayscale8 → ARGB32, así el driver recibe grises
+        #      reales mapeados a ARGB, no los colores RGB originales.
+        img_rgb = QImage(
+            bytes(pix.samples),
+            pix.width,
+            pix.height,
+            pix.stride,
+            QImage.Format.Format_RGB888,
+        )
+        img_rgb.setDotsPerMeterX(int(dpi / 0.0254))
+        img_rgb.setDotsPerMeterY(int(dpi / 0.0254))
 
-        def _on_paint_requested(p: QPrinter):
-            dpi_render = p.resolution()
-            # Durante preview (dpi_render bajo) limitamos a 150 para
-            # que el render sea instantáneo. QPrintPreviewDialog reporta
-            # un DPI distinto al final al imprimir de verdad.
-            es_preview = dpi_render < 200
-            dpi_usado = 150 if es_preview else min(dpi_render, 600)
+        if not tiene_color:
+            # B/N: colapsar a gris para que el driver use solo tinta K
+            img_gray = img_rgb.convertToFormat(QImage.Format.Format_Grayscale8)
+            img      = img_gray.convertToFormat(QImage.Format.Format_ARGB32)
+        else:
+            img = img_rgb.convertToFormat(QImage.Format.Format_ARGB32)
 
-            img = _renderizar_pagina(ruta_pdf, num_pagina, dpi_usado, use_gray)
-            if img is None:
-                return
+        # Propagar DPI a la imagen final (puede haberse perdido en la conversión)
+        img.setDotsPerMeterX(int(dpi / 0.0254))
+        img.setDotsPerMeterY(int(dpi / 0.0254))
 
-            painter = QPainter()
-            if not painter.begin(p):
-                return
-            try:
-                _pintar_en_dispositivo(painter, img)
-                if not es_preview:
-                    _imprimio[0] = True
-            finally:
-                painter.end()
+        # ── 6. Pintar en la impresora ──────────────────────────────────────
+        painter = QPainter()
+        if not painter.begin(printer):
+            QMessageBox.critical(
+                parent, "Error de impresión",
+                "No se pudo iniciar el proceso de impresión.\n"
+                "Verificá que la impresora esté disponible y sin errores."
+            )
+            return False
 
-        preview = QPrintPreviewDialog(printer, parent)
-        preview.setWindowTitle(f"Vista previa de impresión — Página {num_pagina + 1}")
-        # Resize generoso para que la preview ocupe buena parte de la pantalla
-        preview.resize(900, 700)
-        preview.paintRequested.connect(_on_paint_requested)
-        preview.exec()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        return _imprimio[0]
+            viewport = painter.viewport()
+            img_size = img.size().scaled(
+                viewport.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+            )
+            x_off = (viewport.width()  - img_size.width())  // 2
+            y_off = (viewport.height() - img_size.height()) // 2
+            dest  = QRect(x_off, y_off, img_size.width(), img_size.height())
+            painter.drawImage(dest, img)
+        finally:
+            painter.end()
+
+        return True
