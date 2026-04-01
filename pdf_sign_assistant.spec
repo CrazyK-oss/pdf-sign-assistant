@@ -16,70 +16,65 @@
 import sys
 import sysconfig
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files
 
 ROOT = Path(SPEC).parent  # directorio raíz del proyecto
 
-# ── Localizar python3XX.dll automáticamente ──────────────────────────────────────────
-# PyInstaller a veces no encuentra la DLL cuando Python fue instalado
-# solo para el usuario actual (AppData) en lugar de para todos los usuarios.
-# Este bloque la busca en las ubicaciones conocidas y la incluye como binario.
+# ── Localizar python3XX.dll ───────────────────────────────────────────────────
+# Cuando se trabaja dentro de un venv, sys.exec_prefix apunta al venv y
+# la DLL no está ahí — vive en la instalación base de Python.
+# sys.base_exec_prefix siempre apunta a la instalación real, dentro o fuera
+# de un venv, por eso es el candidato correcto.
 _python_dll_name = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
 _python_dll_candidates = [
-    # Instalación estándar para todos los usuarios
-    Path(sys.exec_prefix) / _python_dll_name,
-    # Instalación solo para el usuario actual
-    Path(sys.exec_prefix).parent / _python_dll_name,
-    # Windows\System32 (rara vez, pero posible)
-    Path(sysconfig.get_config_var("BINDIR") or sys.exec_prefix) / _python_dll_name,
+    Path(sys.base_exec_prefix) / _python_dll_name,           # instalación base (venv-safe)
+    Path(sys.base_exec_prefix).parent / _python_dll_name,    # un nivel arriba
+    Path(sys.exec_prefix) / _python_dll_name,                # fallback: exec_prefix del venv
+    Path(sysconfig.get_config_var("BINDIR") or "") / _python_dll_name,
 ]
 
 _python_dll_path = None
-for _candidate in _python_dll_candidates:
-    if _candidate.is_file():
-        _python_dll_path = _candidate
+for _c in _python_dll_candidates:
+    if _c.is_file():
+        _python_dll_path = _c
         print(f"[SPEC] python DLL encontrada: {_python_dll_path}")
         break
 
 if _python_dll_path is None:
-    print(f"[SPEC] ADVERTENCIA: no se encontró {_python_dll_name} — "
-          f"PyInstaller intentará resolverla automáticamente.")
+    print(
+        f"[SPEC] ADVERTENCIA: no se encontró {_python_dll_name} en ninguna "
+        f"ubicación conocida.\n"
+        f"  base_exec_prefix = {sys.base_exec_prefix}\n"
+        f"  exec_prefix      = {sys.exec_prefix}\n"
+        f"PyInstaller intentará resolverla automáticamente."
+    )
 
-# ── Datos a incluir en el bundle ─────────────────────────────────────────────────
+# ── Datos a incluir en el bundle ──────────────────────────────────────────────
 datas = [
-    # config.json de ejemplo (el usuario lo completa en la carpeta del .exe)
-    (str(ROOT / "config.json"),         "."),
-    # Datos internos de pymupdf (fitz)
+    (str(ROOT / "config.json"), "."),
     *collect_data_files("fitz"),
-    # Datos internos de PyQt6
     *collect_data_files("PyQt6"),
 ]
 
-# ── Hidden imports necesarios ────────────────────────────────────────────
+# ── Hidden imports ────────────────────────────────────────────────────────────
 hiddenimports = [
-    # fitz = pymupdf
     "fitz",
     "fitz.fitz",
-    # PyQt6 — módulos que PyInstaller a veces no detecta automáticamente
     "PyQt6.QtPrintSupport",
     "PyQt6.QtSvg",
     "PyQt6.QtXml",
-    # python-dotenv
     "dotenv",
-    # reportlab internals
     "reportlab.graphics.barcode.common",
     "reportlab.graphics.barcode.code128",
     "reportlab.graphics.barcode.code93",
     "reportlab.graphics.barcode.usps",
     "reportlab.graphics.barcode.usps4s",
     "reportlab.graphics.barcode.ecc200datamatrix",
-    # pywin32
     "win32api",
     "win32con",
     "win32print",
     "win32gui",
     "pywintypes",
-    # módulos propios
     "modules.fase1_preview",
     "modules.fase2_print",
     "modules.fase3_scan",
@@ -89,14 +84,12 @@ hiddenimports = [
     "modules.setup",
 ]
 
-# ── Binarios extra ──────────────────────────────────────────────────────────────
+# ── Binarios extra ────────────────────────────────────────────────────────────
 binaries = []
 
-# Incluir python3XX.dll si la encontramos
 if _python_dll_path:
     binaries.append((str(_python_dll_path), "."))
 
-# Incluir las DLLs de pywin32
 try:
     import win32api
     win32_dir = Path(win32api.__file__).parent
@@ -105,13 +98,12 @@ try:
 except Exception:
     pass
 
-# ── Análisis ───────────────────────────────────────────────────────────────────
+# ── Análisis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ["main.py"],
     pathex=[
         str(ROOT),
-        # Añadir el directorio de Python al path de búsqueda
-        # para que PyInstaller encuentre la DLL durante el análisis
+        sys.base_exec_prefix,   # ← instalación real de Python (venv-safe)
         sys.exec_prefix,
     ],
     binaries=binaries,
@@ -120,11 +112,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        "PySimpleGUI",
-        "tkinter",
-        "unittest",
-    ],
+    excludes=["PySimpleGUI", "tkinter", "unittest"],
     noarchive=False,
     optimize=1,
 )
