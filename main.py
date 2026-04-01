@@ -12,53 +12,45 @@ Flujo principal:
   5. Doble‑clic en guardado → vuelve a abrir ese PDF para re‑editar.
   6. Seleccionar guardado → habilita botones Editar y Enviar correo.
   7. Botón ⚙ Ajustes en el header → abre DialogoAjustes (correo emisor).
+
+NOTA PyInstaller:
+  - El bloque bootstrap (pip en runtime) fue eliminado — no funciona en
+    ejecutables congelados. Todas las dependencias deben estar instaladas
+    antes de construir con: pip install -r requirements.txt
+  - Las rutas de carpetas se resuelven vía modules.setup.get_base_dir()
+    para que funcionen tanto en modo script como en modo .exe congelado.
 """
 
 import sys
-import os
 import json
 import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
 
+# ── Dotenv (opcional: no bloquea si el .env no existe) ──────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except Exception:
+    pass
+
+# ── Imports de PyQt6 (deben estar instalados; si faltan → error claro) ───────
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
+    QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
+    QSpacerItem,
+)
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QFont, QColor
+
+# ── Módulo propio de previsualizacion ────────────────────────────────────────
 from modules.fase1_preview import VistaPrevisualizacion
 
+# ── Rutas base (compatibles con PyInstaller frozen y modo script normal) ─────
+from modules.setup import get_base_dir
 
-# ── Bootstrap: instala dependencias si faltan ────────────────────────────────
-def _instalar_deps():
-    reqs = Path(__file__).parent / "requirements.txt"
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-r", str(reqs),
-         "--no-warn-script-location", "--quiet"]
-    )
-
-
-try:
-    from PyQt6.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
-        QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
-        QSpacerItem,
-    )
-    from PyQt6.QtCore import Qt, QSize
-    from PyQt6.QtGui import QFont, QColor
-except ImportError:
-    _instalar_deps()
-    from PyQt6.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QPushButton, QLabel, QFileDialog, QListWidget, QListWidgetItem,
-        QMessageBox, QFrame, QSizePolicy, QStatusBar, QAbstractItemView,
-        QSpacerItem,
-    )
-    from PyQt6.QtCore import Qt, QSize
-    from PyQt6.QtGui import QFont, QColor
-
-
-load_dotenv(Path(__file__).parent / ".env")
-
-BASE_DIR        = Path(__file__).parent
+BASE_DIR        = get_base_dir()
 CARPETA_TRABAJO = BASE_DIR / "pdfs_trabajo"
 CARPETA_FIRMADO = BASE_DIR / "pdfs_firmados"
 CONFIG_PATH     = BASE_DIR / "config.json"
