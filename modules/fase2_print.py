@@ -1,11 +1,20 @@
 # modules/fase2_print.py
-# Estrategia: bypass completo de QPrinter/GDI de Qt para render.
-# Usamos win32print + win32ui (API nativa de Windows) solo para elegir
-# impresora y dibujar un DIB estable de 32 bits, evitando CreateBitmap()
-# con memoria RGB cruda que puede fallar con "Select bitmap object failed".
+# Estrategia definitiva: renderizar el PDF a alta resolución con fitz,
+# luego enviarlo a la impresora usando StretchDIBits() directamente sobre
+# el printer DC. Esto evita:
+#   - El pipeline GDI/ICM que convierte colores (fuente del morado)
+#   - La limitación de 150 DPI del render anterior (fuente de la baja calidad)
+#   - CreateBitmap/SelectObject que fallaba con "Select bitmap object failed"
+#   - ImageWin.Dib que pasaba por GDI y seguía tocando el color
+#
+# StretchDIBits escribe píxeles BGR directamente en el DC de la impresora,
+# sin que ninguna capa intermedia (ICM, GDI+, Qt) los transforme.
 
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 from PyQt6.QtWidgets import QMessageBox
+import ctypes
+import ctypes.wintypes
+import struct
 
 try:
     import fitz
@@ -17,12 +26,13 @@ try:
     import win32print
     import win32ui
     import win32con
-    from PIL import Image, ImageWin
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
 
-PRINT_DPI = 150
+# DPI del render: usamos el DPI real del printer DC para resolución máxima,
+# pero lo capamos a 300 para evitar imágenes enormes en memoria.
+MAX_RENDER_DPI = 300
 
 
 class ImpresionPagina:
@@ -38,9 +48,10 @@ class ImpresionPagina:
             QMessageBox.critical(parent, "Dependencia faltante",
                 "Faltan dependencias para imprimir.\n\n"
                 "Instálalas con:\n"
-                "    pip install pywin32 pillow")
+                "    pip install pywin32")
             return False
 
+        # 1. Elegir impresora (Qt solo para UI, no para imprimir)
         printer_qt = QPrinter(QPrinter.PrinterMode.ScreenResolution)
         printer_qt.setColorMode(QPrinter.ColorMode.Color)
         try:
@@ -60,10 +71,24 @@ class ImpresionPagina:
 
         printer_name = printer_qt.printerName()
 
+        # 2. Abrir printer DC para conocer DPI real y resolución de página
+        hdc = win32ui.CreateDC()
+        hdc.CreatePrinterDC(printer_name)
+        try:
+            printer_dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
+            printer_dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
+            page_px_w    = hdc.GetDeviceCaps(win32con.HORZRES)
+            page_px_h    = hdc.GetDeviceCaps(win32con.VERTRES)
+        finally:
+            hdc.DeleteDC()
+
+        render_dpi = min(max(printer_dpi_x, printer_dpi_y), MAX_RENDER_DPI)
+
+        # 3. Renderizar PDF a la resolución del render_dpi
         try:
             with fitz.open(ruta_pdf) as doc:
                 pagina = doc[num_pagina]
-                zoom = PRINT_DPI / 72.0
+                zoom = render_dpi / 72.0
                 pix = pagina.get_pixmap(
                     matrix=fitz.Matrix(zoom, zoom),
                     colorspace=fitz.csRGB,
@@ -74,10 +99,11 @@ class ImpresionPagina:
                 f"No se pudo renderizar la página:\n\n{e}")
             return False
 
-        pil_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-
+        # 4. Imprimir vía StretchDIBits directo al printer DC
         try:
-            ImpresionPagina._win32_print(printer_name, pil_img)
+            ImpresionPagina._stretch_dibits_print(
+                printer_name, pix, page_px_w, page_px_h
+            )
         except Exception as e:
             QMessageBox.critical(parent, "Error de impresión",
                 f"No se pudo imprimir:\n\n{e}")
@@ -86,34 +112,92 @@ class ImpresionPagina:
         return True
 
     @staticmethod
-    def _win32_print(printer_name: str, pil_img: "Image.Image"):
+    def _stretch_dibits_print(
+        printer_name: str,
+        pix: "fitz.Pixmap",
+        page_px_w: int,
+        page_px_h: int,
+    ):
+        """
+        Envía el pixmap de fitz a la impresora con StretchDIBits.
+
+        fitz entrega RGB (R, G, B) por byte; GDI espera BGR por byte.
+        Hacemos el swap aquí para que los colores sean exactos y sin
+        ninguna capa de gestión de color en el camino.
+        """
+        src_w = pix.width
+        src_h = pix.height
+
+        # Swap R<->B para pasar de RGB (fitz) a BGR (GDI)
+        rgb_bytes = bytearray(pix.samples)
+        for i in range(0, len(rgb_bytes), 3):
+            rgb_bytes[i], rgb_bytes[i + 2] = rgb_bytes[i + 2], rgb_bytes[i]
+
+        # Stride en GDI debe ser múltiplo de 4 bytes
+        stride = ((src_w * 3) + 3) & ~3
+        if stride == src_w * 3:
+            bgr_data = bytes(rgb_bytes)
+        else:
+            # Rellenar cada fila al stride correcto
+            row_bytes = src_w * 3
+            padded = bytearray(stride * src_h)
+            for row in range(src_h):
+                src_start = row * row_bytes
+                dst_start = row * stride
+                padded[dst_start:dst_start + row_bytes] = \
+                    rgb_bytes[src_start:src_start + row_bytes]
+            bgr_data = bytes(padded)
+
+        # BITMAPINFOHEADER (40 bytes)
+        bmi = struct.pack(
+            "<IiiHHIIiiII",
+            40,        # biSize
+            src_w,     # biWidth
+            -src_h,    # biHeight negativo = top-down
+            1,         # biPlanes
+            24,        # biBitCount
+            0,         # biCompression = BI_RGB
+            0,         # biSizeImage (0 para BI_RGB)
+            0, 0,      # biXPelsPerMeter, biYPelsPerMeter
+            0, 0,      # biClrUsed, biClrImportant
+        )
+
+        # Escalar manteniendo proporción centrada
+        scale   = min(page_px_w / src_w, page_px_h / src_h)
+        dest_w  = max(1, int(src_w * scale))
+        dest_h  = max(1, int(src_h * scale))
+        x_off   = (page_px_w - dest_w) // 2
+        y_off   = (page_px_h - dest_h) // 2
+
+        gdi32 = ctypes.windll.gdi32
+        SRCCOPY        = 0x00CC0020
+        DIB_RGB_COLORS = 0
+        HALFTONE       = 4  # SetStretchBltMode para máxima calidad
+
         hdc = win32ui.CreateDC()
         hdc.CreatePrinterDC(printer_name)
+        hdc_handle = hdc.GetHandleOutput()
+
+        gdi32.SetStretchBltMode(hdc_handle, HALFTONE)
+
+        hdc.StartDoc("PDF Print")
+        hdc.StartPage()
         try:
-            pw = hdc.GetDeviceCaps(win32con.HORZRES)
-            ph = hdc.GetDeviceCaps(win32con.VERTRES)
-
-            img_w, img_h = pil_img.size
-            scale = min(pw / img_w, ph / img_h)
-            dest_w = max(1, int(img_w * scale))
-            dest_h = max(1, int(img_h * scale))
-            x_off = (pw - dest_w) // 2
-            y_off = (ph - dest_h) // 2
-
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            pil_resized = pil_img.resize((dest_w, dest_h), Image.LANCZOS)
-
-            dib = ImageWin.Dib(pil_resized)
-
-            hdc.StartDoc("PDF Print")
-            try:
-                hdc.StartPage()
-                try:
-                    dib.draw(hdc.GetHandleOutput(), (x_off, y_off, x_off + dest_w, y_off + dest_h))
-                finally:
-                    hdc.EndPage()
-            finally:
-                hdc.EndDoc()
+            # StretchDIBits(hdc, xDest, yDest, nDestWidth, nDestHeight,
+            #               xSrc, ySrc, nSrcWidth, nSrcHeight,
+            #               lpBits, lpBitsInfo, iUsage, dwRop)
+            result = gdi32.StretchDIBits(
+                hdc_handle,
+                x_off, y_off, dest_w, dest_h,
+                0, 0, src_w, src_h,
+                bgr_data,
+                bmi,
+                DIB_RGB_COLORS,
+                SRCCOPY,
+            )
+            if result == 0:
+                raise RuntimeError("StretchDIBits retornó 0 — verifique el driver de la impresora.")
         finally:
+            hdc.EndPage()
+            hdc.EndDoc()
             hdc.DeleteDC()
