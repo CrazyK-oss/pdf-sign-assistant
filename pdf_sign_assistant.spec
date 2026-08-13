@@ -50,11 +50,18 @@ if _python_dll_path is None:
     )
 
 # ── Datos a incluir en el bundle ──────────────────────────────────────────────
+# config.json ya no se versiona (lo escribe el diálogo de Ajustes y puede
+# tener credenciales), así que sólo se incluye si existe en el checkout.
+# Sin él la app arranca igual: modules.setup.cargar_config() cae en los
+# valores por defecto.
 datas = [
-    (str(ROOT / "config.json"), "."),
     *collect_data_files("fitz"),
     *collect_data_files("PyQt6"),
 ]
+
+for _cfg in ("config.json", "config.example.json"):
+    if (ROOT / _cfg).is_file():
+        datas.append((str(ROOT / _cfg), "."))
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hiddenimports = [
@@ -82,6 +89,8 @@ hiddenimports = [
     "modules.fase_guardar",
     "modules.settings",
     "modules.setup",
+    "modules.theme",
+    "modules.ui",
 ]
 
 # ── Binarios extra ────────────────────────────────────────────────────────────
@@ -112,7 +121,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PySimpleGUI", "tkinter", "unittest"],
+    # exchangelib y watchdog ya no se usan; excluirlos evita arrastrar
+    # lxml/dnspython/tzlocal al bundle si están en el entorno.
+    excludes=[
+        "PySimpleGUI", "tkinter", "unittest",
+        "exchangelib", "watchdog", "lxml", "dnspython", "tzlocal",
+    ],
     noarchive=False,
     optimize=1,
 )

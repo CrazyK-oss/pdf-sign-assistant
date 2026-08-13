@@ -1,27 +1,47 @@
 """
 modules/settings.py
 ============================================================
-Diálogo de Ajustes — configuración del correo emisor.
-Usa PyQt6 nativo y hereda el tema activo vía modules.theme.
+Diálogo de Ajustes — cuenta de correo emisor.
 
-Fix aplicado: eliminado QFormLayout.removeRow() que causaba crash
-en varias versiones de PyQt6. La fila de contraseña se construye
-como QWidget contenedor desde el inicio, sin removeRow().
+Notas
+-----
+* No usa QFormLayout.removeRow() (crasheaba en varias versiones de
+  PyQt6): la fila de contraseña se construye como contenedor desde
+  el inicio.
+* La contraseña SMTP se guarda en texto plano en config.json y, hoy,
+  ningún flujo la usa: el envío se hace abriendo el cliente de correo
+  del sistema (mailto:). Por eso el campo es opcional y está avisado
+  en la interfaz. Ver README → "Sobre las credenciales".
+* Todo el estilo viene del tema; el diálogo entra en un scroll para
+  no recortarse en pantallas bajas.
 """
 
-import json
+from __future__ import annotations
+
 from pathlib import Path
 
-from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFrame, QSpinBox, QComboBox, QMessageBox,
-    QFormLayout, QWidget,
-)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLineEdit,
+    QMessageBox,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
-from modules.theme import THEME, font_pt
-
+from modules.setup import guardar_config
+from modules.theme import SIZE, SPACE
+from modules.ui import (
+    AreaScroll,
+    FilaAdaptable,
+    boton,
+    etiqueta,
+    separador,
+)
 
 SMTP_PRESETS = {
     "Gmail":             ("smtp.gmail.com",       587),
@@ -32,213 +52,169 @@ SMTP_PRESETS = {
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sep() -> QFrame:
-    s = QFrame()
-    s.setFrameShape(QFrame.Shape.HLine)
-    s.setFrameShadow(QFrame.Shadow.Plain)
-    return s
-
-
-def _lbl_seccion(texto: str) -> QLabel:
-    lbl = QLabel(texto)
-    lbl.setObjectName("seccion")
-    return lbl
-
-
-def _lbl_hint(texto: str) -> QLabel:
-    lbl = QLabel(texto)
-    lbl.setStyleSheet(f"font-size: {font_pt(11)}px; color: {THEME['text_muted']};")
-    lbl.setWordWrap(True)
-    return lbl
-
-
-def _ghost_btn(texto: str, fixed_w: int = 0) -> QPushButton:
-    b = QPushButton(texto)
-    b.setProperty("ghost", "true")
-    b.style().unpolish(b)
-    b.style().polish(b)
-    if fixed_w:
-        b.setFixedWidth(fixed_w)
-    return b
-
-
-def _secondary_btn(texto: str) -> QPushButton:
-    b = QPushButton(texto)
-    b.setProperty("secondary", "true")
-    b.style().unpolish(b)
-    b.style().polish(b)
-    return b
-
-
-# ── Diálogo principal ─────────────────────────────────────────────────────────
-
 class DialogoAjustes(QDialog):
-    """
-    Ventana modal de ajustes del correo emisor.
-    Lee y escribe directamente en config.json.
-    """
+    """Ventana modal de ajustes. Lee y escribe config.json."""
 
     def __init__(self, config_path: Path, config: dict, parent=None):
         super().__init__(parent)
         self.config_path = config_path
         self.config = dict(config)
 
-        self.setWindowTitle("Ajustes — Correo Emisor")
-        self.setMinimumWidth(500)
+        self.setWindowTitle("Ajustes — Correo emisor")
+        self.setObjectName("pantalla")
+        # Mínimo chico (entra en pantallas bajas gracias al scroll) pero
+        # tamaño inicial cómodo, que muestra el formulario completo.
+        self.setMinimumWidth(400)
+        self.setMinimumHeight(360)
+        self.resize(500, 660)
         self.setModal(True)
         self._build_ui()
         self._cargar_valores()
 
     # ── Build ─────────────────────────────────────────────────────────────
-
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 22)
-        root.setSpacing(0)
+        raiz = QVBoxLayout(self)
+        raiz.setContentsMargins(0, 0, 0, 0)
+        raiz.setSpacing(0)
+
+        area = AreaScroll(
+            margenes=(SPACE["xl"], SPACE["xl"], SPACE["xl"], SPACE["md"]),
+            spacing=SPACE["sm"],
+        )
+        root = area.lay
 
         # Encabezado
-        lbl_titulo = QLabel("Ajustes de correo")
-        lbl_titulo.setFont(QFont("Segoe UI", font_pt(15), QFont.Weight.Bold))
-        root.addWidget(lbl_titulo)
-        root.addSpacing(4)
-        root.addWidget(_lbl_hint(
-            "Configurá la cuenta desde la cual se envían los documentos firmados."
-        ))
-        root.addSpacing(14)
-        root.addWidget(_sep())
-        root.addSpacing(16)
+        root.addWidget(etiqueta("Ajustes de correo", rol="titulo"))
+        root.addWidget(etiqueta(
+            "Configurá la cuenta desde la cual se envían los documentos firmados.",
+            rol="hint", wrap=True))
+        root.addSpacing(SPACE["sm"])
+        root.addWidget(separador())
+        root.addSpacing(SPACE["sm"])
 
         # Proveedor SMTP
-        root.addWidget(_lbl_seccion("PROVEEDOR SMTP"))
-        root.addSpacing(8)
+        root.addWidget(etiqueta("PROVEEDOR SMTP", rol="seccion"))
         self.combo_proveedor = QComboBox()
+        self.combo_proveedor.setMinimumHeight(SIZE["input"])
         self.combo_proveedor.addItems(list(SMTP_PRESETS.keys()))
         self.combo_proveedor.currentTextChanged.connect(self._on_proveedor_cambiado)
         root.addWidget(self.combo_proveedor)
-        root.addSpacing(4)
-        root.addWidget(_lbl_hint(
+        root.addWidget(etiqueta(
             "Elegí un proveedor para autocompletar servidor y puerto, "
-            "o 'Personalizado' para ingresarlos manualmente."
-        ))
-        root.addSpacing(16)
-        root.addWidget(_sep())
-        root.addSpacing(16)
+            "o 'Personalizado' para ingresarlos a mano.", rol="hint", wrap=True))
+        root.addSpacing(SPACE["md"])
+        root.addWidget(separador())
+        root.addSpacing(SPACE["sm"])
 
         # Credenciales
-        root.addWidget(_lbl_seccion("CREDENCIALES"))
-        root.addSpacing(10)
+        root.addWidget(etiqueta("CREDENCIALES", rol="seccion"))
 
         form_creds = QFormLayout()
-        form_creds.setSpacing(10)
+        form_creds.setSpacing(SPACE["sm"])
         form_creds.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form_creds.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        # Correo
         self.input_email = QLineEdit()
+        self.input_email.setMinimumHeight(SIZE["input"])
         self.input_email.setPlaceholderText("tu_correo@dominio.com")
+        self.input_email.setClearButtonEnabled(True)
         form_creds.addRow("Correo emisor:", self.input_email)
 
-        # Contraseña — contenedor con toggle (sin removeRow)
         self.input_password = QLineEdit()
-        self.input_password.setPlaceholderText("Contraseña de aplicación")
+        self.input_password.setMinimumHeight(SIZE["input"])
+        self.input_password.setPlaceholderText("Contraseña de aplicación (opcional)")
         self.input_password.setEchoMode(QLineEdit.EchoMode.Password)
 
-        self.btn_toggle_pass = _ghost_btn("👁", fixed_w=38)
-        self.btn_toggle_pass.setFixedHeight(38)
+        self.btn_toggle_pass = boton("👁", variant="ghost", fixed_w=40,
+                                     tooltip="Mostrar / ocultar contraseña")
         self.btn_toggle_pass.setCheckable(True)
-        self.btn_toggle_pass.setToolTip("Mostrar / ocultar contraseña")
         self.btn_toggle_pass.toggled.connect(self._toggle_password)
 
         contenedor_pass = QWidget()
-        contenedor_pass.setStyleSheet("background: transparent;")
         lay_pass = QHBoxLayout(contenedor_pass)
         lay_pass.setContentsMargins(0, 0, 0, 0)
-        lay_pass.setSpacing(6)
-        lay_pass.addWidget(self.input_password)
+        lay_pass.setSpacing(SPACE["xs"])
+        lay_pass.addWidget(self.input_password, 1)
         lay_pass.addWidget(self.btn_toggle_pass)
-
         form_creds.addRow("Contraseña:", contenedor_pass)
         root.addLayout(form_creds)
-        root.addSpacing(6)
-        root.addWidget(_lbl_hint(
-            "Para Gmail: usá una Contraseña de Aplicación, no tu contraseña normal. "
-            "Activala en Google → Seguridad → Verificación en 2 pasos → Contraseñas de app."
-        ))
-        root.addSpacing(16)
-        root.addWidget(_sep())
-        root.addSpacing(16)
+
+        root.addWidget(etiqueta(
+            "⚠️  La contraseña se guarda en texto plano en config.json y hoy "
+            "ningún envío la usa (el correo se abre en tu cliente por mailto:). "
+            "Podés dejarla vacía.", rol="hint", wrap=True))
+        root.addSpacing(SPACE["md"])
+        root.addWidget(separador())
+        root.addSpacing(SPACE["sm"])
 
         # Servidor SMTP
-        root.addWidget(_lbl_seccion("SERVIDOR SMTP"))
-        root.addSpacing(10)
-
+        root.addWidget(etiqueta("SERVIDOR SMTP", rol="seccion"))
         form_smtp = QFormLayout()
-        form_smtp.setSpacing(10)
+        form_smtp.setSpacing(SPACE["sm"])
         form_smtp.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form_smtp.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.input_servidor = QLineEdit()
+        self.input_servidor.setMinimumHeight(SIZE["input"])
         self.input_servidor.setPlaceholderText("smtp.gmail.com")
         form_smtp.addRow("Servidor SMTP:", self.input_servidor)
 
         self.spin_puerto = QSpinBox()
+        self.spin_puerto.setMinimumHeight(SIZE["input"])
         self.spin_puerto.setRange(1, 65535)
         self.spin_puerto.setValue(587)
         self.spin_puerto.setFixedWidth(110)
         form_smtp.addRow("Puerto:", self.spin_puerto)
-
         root.addLayout(form_smtp)
-        root.addSpacing(22)
-        root.addWidget(_sep())
-        root.addSpacing(16)
+        root.addStretch()
 
-        # Botones
-        fila_btns = QHBoxLayout()
-        fila_btns.setSpacing(10)
+        raiz.addWidget(area, 1)
 
-        btn_cancelar = _secondary_btn("Cancelar")
-        btn_cancelar.setMinimumHeight(38)
-        btn_cancelar.clicked.connect(self.reject)
-        fila_btns.addWidget(btn_cancelar)
-
-        fila_btns.addStretch()
-
-        btn_guardar = QPushButton("💾  Guardar ajustes")
-        btn_guardar.setMinimumHeight(42)
-        btn_guardar.setMinimumWidth(160)
-        btn_guardar.clicked.connect(self._guardar)
-        fila_btns.addWidget(btn_guardar)
-
-        root.addLayout(fila_btns)
+        # Botones (se apilan en diálogos angostos)
+        pie = QWidget()
+        lay_pie = QVBoxLayout(pie)
+        lay_pie.setContentsMargins(SPACE["xl"], SPACE["sm"], SPACE["xl"], SPACE["lg"])
+        acciones = FilaAdaptable(breakpoint_px=360, spacing=SPACE["sm"])
+        acciones.agregar(boton("Cancelar", variant="secondary",
+                               on_click=self.reject))
+        acciones.agregar_stretch()
+        acciones.agregar(boton("💾  Guardar ajustes", height=SIZE["btn_lg"],
+                               min_w=160, on_click=self._guardar))
+        lay_pie.addWidget(acciones)
+        raiz.addWidget(pie)
 
     # ── Helpers internos ──────────────────────────────────────────────────
-
     def _toggle_password(self, visible: bool):
         self.input_password.setEchoMode(
-            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
-        )
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
 
     def _cargar_valores(self):
         self.input_email.setText(self.config.get("email_user", ""))
         self.input_password.setText(self.config.get("email_password", ""))
 
         servidor = self.config.get("smtp_server", "smtp.gmail.com")
-        puerto   = int(self.config.get("smtp_port", 587))
-        self.input_servidor.setText(servidor)
-        self.spin_puerto.setValue(puerto)
+        try:
+            puerto = int(self.config.get("smtp_port", 587))
+        except (TypeError, ValueError):
+            puerto = 587
 
-        preset_detectado = "Personalizado"
+        self.input_servidor.setText(servidor)
+        self.spin_puerto.setValue(max(1, min(65535, puerto)))
+
+        preset = "Personalizado"
         for nombre, (srv, _) in SMTP_PRESETS.items():
             if srv and srv == servidor:
-                preset_detectado = nombre
+                preset = nombre
                 break
 
         self.combo_proveedor.blockSignals(True)
-        idx = self.combo_proveedor.findText(preset_detectado)
+        idx = self.combo_proveedor.findText(preset)
         if idx >= 0:
             self.combo_proveedor.setCurrentIndex(idx)
         self.combo_proveedor.blockSignals(False)
-        self._on_proveedor_cambiado(preset_detectado)
+        self._on_proveedor_cambiado(preset)
 
     def _on_proveedor_cambiado(self, nombre: str):
         servidor, puerto = SMTP_PRESETS.get(nombre, (None, None))
@@ -251,40 +227,36 @@ class DialogoAjustes(QDialog):
             self.spin_puerto.setValue(puerto)
 
     # ── Guardar ───────────────────────────────────────────────────────────
-
     def _guardar(self):
-        email    = self.input_email.text().strip()
-        password = self.input_password.text()
+        email = self.input_email.text().strip()
         servidor = self.input_servidor.text().strip()
-        puerto   = self.spin_puerto.value()
 
         if not email:
-            QMessageBox.warning(self, "Campo requerido", "El correo emisor no puede estar vacío.")
+            QMessageBox.warning(self, "Campo requerido",
+                                "El correo emisor no puede estar vacío.")
             self.input_email.setFocus()
             return
-        if "@" not in email or "." not in email:
-            QMessageBox.warning(self, "Correo inválido", "Ingresá un correo válido (ej: cuenta@gmail.com).")
+        if "@" not in email or "." not in email.split("@")[-1]:
+            QMessageBox.warning(self, "Correo inválido",
+                                "Ingresá un correo válido (ej: cuenta@gmail.com).")
             self.input_email.setFocus()
-            return
-        if not password:
-            QMessageBox.warning(self, "Campo requerido", "La contraseña no puede estar vacía.")
-            self.input_password.setFocus()
             return
         if not servidor:
-            QMessageBox.warning(self, "Campo requerido", "El servidor SMTP no puede estar vacío.")
+            QMessageBox.warning(self, "Campo requerido",
+                                "El servidor SMTP no puede estar vacío.")
             self.input_servidor.setFocus()
             return
 
-        self.config["email_user"]     = email
-        self.config["email_password"] = password
-        self.config["smtp_server"]    = servidor
-        self.config["smtp_port"]      = puerto
+        self.config["email_user"] = email
+        self.config["email_password"] = self.input_password.text()
+        self.config["smtp_server"] = servidor
+        self.config["smtp_port"] = self.spin_puerto.value()
 
         try:
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            QMessageBox.critical(self, "Error al guardar", f"No se pudo escribir config.json:\n{e}")
+            guardar_config(self.config, self.config_path)
+        except OSError as e:
+            QMessageBox.critical(self, "Error al guardar",
+                                 f"No se pudo escribir config.json:\n{e}")
             return
 
         self.accept()

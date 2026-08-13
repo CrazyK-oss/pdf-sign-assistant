@@ -1,119 +1,61 @@
 """
 modules/fase4_email.py
 ============================================================
-Fase 4 – Enviar el PDF firmado por correo.
+Enviar el PDF firmado por correo.
 
 Estrategia:
   1. El usuario escribe el destinatario y confirma.
   2. Se crea una carpeta temporal _envio_temp/ dentro de pdfs_firmados/
      con únicamente una copia del PDF a enviar.
-  3. Se abre esa carpeta en el Explorador (solo ese archivo visible)
-     y simultáneamente se abre el cliente de correo predeterminado
-     con destinatario, asunto y cuerpo prellenados vía mailto:.
+  3. Se abre esa carpeta en el explorador (con ese único archivo a la
+     vista) y, en paralelo, el cliente de correo predeterminado con
+     destinatario, asunto y cuerpo prellenados vía mailto:.
   4. El usuario arrastra el archivo al correo y envía.
-  5. La carpeta _envio_temp/ se borra al cerrar la app (closeEvent en main.py).
-     Adicionalmente se limpia al arrancar (limpiar_temp_al_iniciar) por si
-     la sesión anterior terminó abruptamente.
+  5. _envio_temp/ se borra al cerrar la app (closeEvent en main.py) y
+     también al arrancar, por si la sesión anterior terminó de golpe.
 
 No requiere pywin32, Outlook ni ningún cliente específico.
+
+Cambios de esta versión
+-----------------------
+* Se eliminó la paleta y el stylesheet propios del módulo (duplicaban
+  el tema con otros colores, así que el diálogo salía en claro aunque
+  la app estuviera en oscuro).
+* Layout responsive y con menor ancho mínimo.
+* El botón de acción también se habilita con Enter, y el diálogo
+  recuerda el último destinatario dentro de la sesión.
 """
 
-import os
+from __future__ import annotations
+
 import re
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTextEdit,
+    QDialog,
+    QHBoxLayout,
+    QLineEdit,
+    QMessageBox,
+    QTextEdit,
     QVBoxLayout,
 )
 
-# ── Constantes ────────────────────────────────────────────────────────────────
+from modules.theme import SIZE, SPACE, repolish
+from modules.ui import (
+    FilaAdaptable,
+    abrir_en_sistema,
+    boton,
+    etiqueta,
+    separador,
+)
+
 TEMP_FOLDER_NAME = "_envio_temp"
-
-
-# ── Paleta ───────────────────────────────────────────────────────────────────
-C_BG        = "#f7f6f2"
-C_SURFACE   = "#f3f0ec"
-C_BORDER    = "#d4d1ca"
-C_TEXT      = "#28251d"
-C_MUTED     = "#7a7974"
-C_PRIMARY   = "#01696f"
-C_PRIMARY_H = "#0c4e54"
-C_PRIMARY_A = "#0f3638"
-C_FAINT     = "#bab9b4"
-C_ERROR_TXT = "#a13544"
-
-STYLESHEET_DIALOG = f"""
-QDialog, QWidget {{
-    background-color: {C_BG};
-    color: {C_TEXT};
-    font-family: 'Segoe UI', 'Inter', sans-serif;
-    font-size: 13px;
-}}
-QLineEdit {{
-    background-color: {C_SURFACE};
-    border: 1px solid {C_BORDER};
-    border-radius: 6px;
-    padding: 8px 12px;
-    font-size: 14px;
-    color: {C_TEXT};
-}}
-QLineEdit:focus {{
-    border-color: {C_PRIMARY};
-    background-color: white;
-}}
-QLineEdit[invalid="true"] {{
-    border-color: {C_ERROR_TXT};
-}}
-QTextEdit {{
-    background-color: {C_SURFACE};
-    border: 1px solid {C_BORDER};
-    border-radius: 6px;
-    padding: 8px;
-    font-family: 'Cascadia Code', 'Consolas', monospace;
-    font-size: 12px;
-    color: {C_MUTED};
-}}
-QPushButton {{
-    background-color: {C_PRIMARY};
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 8px 20px;
-    font-weight: 600;
-    font-size: 13px;
-    min-height: 36px;
-}}
-QPushButton:hover   {{ background-color: {C_PRIMARY_H}; }}
-QPushButton:pressed {{ background-color: {C_PRIMARY_A}; }}
-QPushButton:disabled {{
-    background-color: {C_BORDER};
-    color: {C_MUTED};
-}}
-QPushButton[secondary="true"] {{
-    background-color: transparent;
-    color: {C_PRIMARY};
-    border: 1.5px solid {C_PRIMARY};
-}}
-QPushButton[secondary="true"]:hover {{
-    background-color: {C_PRIMARY};
-    color: white;
-}}
-QFrame[frameShape="4"], QFrame[frameShape="5"] {{
-    color: {C_BORDER};
-    max-height: 1px;
-}}
-"""
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 EMAIL_REGEX = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.]{2,}$")
+
+# Último destinatario usado en esta sesión (evita re-tipear en envíos seguidos)
+_ULTIMO_DESTINATARIO = ""
 
 
 def _es_email_valido(email: str) -> bool:
@@ -129,7 +71,7 @@ def _construir_resumen(nombre_doc: str, paginas: list) -> str:
     )
 
 
-# ── Gestión de carpeta temporal ───────────────────────────────────────────────
+# ── Gestión de la carpeta temporal ────────────────────────────────────────────
 
 def _carpeta_temp(carpeta_firmados: Path) -> Path:
     return carpeta_firmados / TEMP_FOLDER_NAME
@@ -141,26 +83,22 @@ def _borrar_temp(carpeta_firmados: Path) -> None:
     if temp.exists():
         try:
             shutil.rmtree(temp)
-        except Exception:
+        except OSError:
             pass
 
 
 def limpiar_temp_al_iniciar(carpeta_firmados: Path) -> None:
-    """Llamá al arrancar la app: limpia restos de sesiones anteriores."""
+    """Llamar al arrancar la app: limpia restos de sesiones anteriores."""
     _borrar_temp(carpeta_firmados)
 
 
 def limpiar_temp_al_salir(carpeta_firmados: Path) -> None:
-    """Llamá al cerrar la app (closeEvent/aboutToQuit)."""
+    """Llamar al cerrar la app (closeEvent / aboutToQuit)."""
     _borrar_temp(carpeta_firmados)
 
 
 def _preparar_temp(pdf_origen: Path, carpeta_firmados: Path) -> Path:
-    """
-    Crea _envio_temp/ con solo la copia del PDF.
-    Devuelve la ruta de la copia temporal.
-    La limpieza la gestiona limpiar_temp_al_salir(), no un timer.
-    """
+    """Crea _envio_temp/ con sólo la copia del PDF y devuelve esa ruta."""
     temp = _carpeta_temp(carpeta_firmados)
     if temp.exists():
         shutil.rmtree(temp)
@@ -171,31 +109,13 @@ def _preparar_temp(pdf_origen: Path, carpeta_firmados: Path) -> Path:
     return destino
 
 
-# ── Abrir Explorador y cliente de correo ─────────────────────────────────────
-
-def _abrir_explorador_temp(temp: Path) -> None:
-    """Abre el Explorador apuntando a la carpeta temporal."""
-    if sys.platform == "win32":
-        subprocess.Popen(["explorer", str(temp)])
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(temp)])
-    else:
-        subprocess.Popen(["xdg-open", str(temp)])
-
-
 def _abrir_mailto(destinatario: str, asunto: str, cuerpo: str) -> None:
     """Abre el cliente de correo predeterminado vía mailto:."""
-    uri = (
+    abrir_en_sistema(
         f"mailto:{quote(destinatario)}"
         f"?subject={quote(asunto)}"
         f"&body={quote(cuerpo)}"
     )
-    if sys.platform == "win32":
-        os.startfile(uri)  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", uri])
-    else:
-        subprocess.Popen(["xdg-open", uri])
 
 
 # ── Diálogo principal ─────────────────────────────────────────────────────────
@@ -204,129 +124,103 @@ class DialogoEnviarEmail(QDialog):
     def __init__(self, pdf_firmado: Path, carpeta_firmados: Path,
                  config: dict, paginas: list, nombre_doc: str, parent=None):
         super().__init__(parent)
-        self.pdf_firmado      = pdf_firmado
+        self.pdf_firmado = pdf_firmado
         self.carpeta_firmados = carpeta_firmados
-        self.paginas          = paginas
-        self.nombre_doc       = nombre_doc
+        self.paginas = paginas
+        self.nombre_doc = nombre_doc
 
         self.setWindowTitle("Enviar documento firmado")
-        self.setMinimumWidth(480)
+        self.setObjectName("pantalla")
+        self.setMinimumWidth(420)
         self.setModal(True)
-        self.setStyleSheet(STYLESHEET_DIALOG)
         self._build_ui()
-
-    def _sep(self) -> QFrame:
-        s = QFrame()
-        s.setFrameShape(QFrame.Shape.HLine)
-        s.setFrameShadow(QFrame.Shadow.Plain)
-        return s
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(28, 24, 28, 24)
-        lay.setSpacing(0)
+        lay.setContentsMargins(SPACE["xl"], SPACE["xl"], SPACE["xl"], SPACE["xl"])
+        lay.setSpacing(SPACE["sm"])
 
+        # Título
         fila_titulo = QHBoxLayout()
-        icono = QLabel("✉️")
-        icono.setFont(QFont("Segoe UI Emoji", 20))
+        fila_titulo.setSpacing(SPACE["sm"])
+        icono = etiqueta("✉️")
+        icono.setStyleSheet("font-size: 20px;")
         fila_titulo.addWidget(icono)
-        fila_titulo.addSpacing(10)
-        lbl_titulo = QLabel("Enviar por correo")
-        lbl_titulo.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
-        fila_titulo.addWidget(lbl_titulo)
+        fila_titulo.addWidget(etiqueta("Enviar por correo", rol="titulo"))
         fila_titulo.addStretch()
         lay.addLayout(fila_titulo)
-        lay.addSpacing(4)
 
-        lbl_sub = QLabel(
-            f"Se abrirá una carpeta con <b>{self.pdf_firmado.name}</b> listo para adjuntar, "
-            "y tu cliente de correo con el asunto prellenado."
-        )
-        lbl_sub.setStyleSheet(f"color: {C_MUTED}; font-size: 12px;")
-        lbl_sub.setWordWrap(True)
-        lay.addWidget(lbl_sub)
-        lay.addSpacing(18)
-        lay.addWidget(self._sep())
-        lay.addSpacing(18)
+        lay.addWidget(etiqueta(
+            f"Se abrirá una carpeta con «{self.pdf_firmado.name}» listo para "
+            "adjuntar, y tu cliente de correo con el asunto prellenado.",
+            rol="hint", wrap=True))
+        lay.addSpacing(SPACE["sm"])
+        lay.addWidget(separador())
+        lay.addSpacing(SPACE["sm"])
 
-        lbl_dest = QLabel("Correo destinatario")
-        lbl_dest.setStyleSheet("font-weight: 600;")
-        lay.addWidget(lbl_dest)
-        lay.addSpacing(6)
-
+        # Destinatario
+        lay.addWidget(etiqueta("Correo destinatario", rol="subtitulo"))
         self.input_email = QLineEdit()
+        self.input_email.setMinimumHeight(SIZE["input"])
         self.input_email.setPlaceholderText("ejemplo@dominio.com")
+        self.input_email.setText(_ULTIMO_DESTINATARIO)
+        self.input_email.setClearButtonEnabled(True)
         self.input_email.textChanged.connect(self._on_email_changed)
+        self.input_email.returnPressed.connect(self._on_abrir)
         lay.addWidget(self.input_email)
-        lay.addSpacing(4)
 
-        self.lbl_error = QLabel("")
-        self.lbl_error.setStyleSheet(f"color: {C_ERROR_TXT}; font-size: 11px;")
+        self.lbl_error = etiqueta("", rol="error", wrap=True)
         lay.addWidget(self.lbl_error)
-        lay.addSpacing(16)
+        lay.addSpacing(SPACE["sm"])
 
-        lbl_resumen_titulo = QLabel("Resumen del documento")
-        lbl_resumen_titulo.setStyleSheet("font-weight: 600;")
-        lay.addWidget(lbl_resumen_titulo)
-        lay.addSpacing(6)
-
+        # Resumen
+        lay.addWidget(etiqueta("Resumen del documento", rol="subtitulo"))
         self.txt_resumen = QTextEdit()
         self.txt_resumen.setReadOnly(True)
-        self.txt_resumen.setFixedHeight(82)
+        self.txt_resumen.setProperty("readonly", "true")
+        repolish(self.txt_resumen)
+        self.txt_resumen.setFixedHeight(80)
         self.txt_resumen.setPlainText(
-            _construir_resumen(self.nombre_doc, self.paginas)
-        )
+            _construir_resumen(self.nombre_doc, self.paginas))
         lay.addWidget(self.txt_resumen)
-        lay.addSpacing(20)
-        lay.addWidget(self._sep())
-        lay.addSpacing(14)
+        lay.addSpacing(SPACE["md"])
+        lay.addWidget(separador())
+        lay.addSpacing(SPACE["sm"])
 
-        lbl_nota = QLabel(
-            "ℹ️  Se abrirá una carpeta temporal con solo el archivo a enviar "
-            "y tu cliente de correo. Arrastrá el PDF al correo y enviá. "
-            "La carpeta se borra automáticamente al cerrar la app."
-        )
-        lbl_nota.setStyleSheet(f"font-size: 11px; color: {C_MUTED};")
-        lbl_nota.setWordWrap(True)
-        lay.addWidget(lbl_nota)
-        lay.addSpacing(16)
+        lay.addWidget(etiqueta(
+            "ℹ️  Arrastrá el PDF desde la carpeta al correo y enviá. "
+            "La carpeta temporal se borra al cerrar la app.",
+            rol="hint", wrap=True))
+        lay.addSpacing(SPACE["md"])
 
-        fila_btns = QHBoxLayout()
-        fila_btns.setSpacing(10)
+        # Acciones (se apilan si el diálogo queda angosto)
+        acciones = FilaAdaptable(breakpoint_px=380, spacing=SPACE["sm"])
+        acciones.agregar(boton("Cancelar", variant="secondary",
+                               on_click=self.reject))
+        acciones.agregar_stretch()
+        self.btn_abrir = boton("✉️  Abrir correo y carpeta", min_w=200,
+                               enabled=False, on_click=self._on_abrir)
+        acciones.agregar(self.btn_abrir)
+        lay.addWidget(acciones)
 
-        btn_cancelar = QPushButton("Cancelar")
-        btn_cancelar.setProperty("secondary", "true")
-        btn_cancelar.style().unpolish(btn_cancelar)
-        btn_cancelar.style().polish(btn_cancelar)
-        btn_cancelar.clicked.connect(self.reject)
-        fila_btns.addWidget(btn_cancelar)
-        fila_btns.addStretch()
-
-        self.btn_abrir = QPushButton("✉️  Abrir correo y carpeta")
-        self.btn_abrir.setMinimumWidth(200)
-        self.btn_abrir.setEnabled(False)
-        self.btn_abrir.clicked.connect(self._on_abrir)
-        fila_btns.addWidget(self.btn_abrir)
-        lay.addLayout(fila_btns)
+        self._on_email_changed(self.input_email.text())
 
     def _on_email_changed(self, texto: str):
         texto = texto.strip()
         if not texto:
-            self.lbl_error.setText("")
-            self.input_email.setProperty("invalid", "false")
-            self.btn_abrir.setEnabled(False)
+            error, valido = "", False
         elif not _es_email_valido(texto):
-            self.lbl_error.setText("Correo inválido (ejemplo: nombre@dominio.com)")
-            self.input_email.setProperty("invalid", "true")
-            self.btn_abrir.setEnabled(False)
+            error, valido = "Correo inválido (ejemplo: nombre@dominio.com)", False
         else:
-            self.lbl_error.setText("")
-            self.input_email.setProperty("invalid", "false")
-            self.btn_abrir.setEnabled(True)
-        self.input_email.style().unpolish(self.input_email)
-        self.input_email.style().polish(self.input_email)
+            error, valido = "", True
+
+        self.lbl_error.setText(error)
+        self.input_email.setProperty("invalid", "true" if error else "false")
+        repolish(self.input_email)
+        self.btn_abrir.setEnabled(valido)
 
     def _on_abrir(self):
+        global _ULTIMO_DESTINATARIO
         destinatario = self.input_email.text().strip()
         if not _es_email_valido(destinatario):
             return
@@ -336,35 +230,35 @@ class DialogoEnviarEmail(QDialog):
 
         try:
             copia_temp = _preparar_temp(self.pdf_firmado, self.carpeta_firmados)
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Error al preparar archivo",
-                f"No se pudo crear la carpeta temporal:\n\n{e}"
-            )
-            self.btn_abrir.setText("✉️  Abrir correo y carpeta")
-            self.btn_abrir.setEnabled(True)
+        except Exception as e:                       # noqa: BLE001
+            QMessageBox.critical(self, "Error al preparar archivo",
+                                 f"No se pudo crear la carpeta temporal:\n\n{e}")
+            self._restablecer_boton()
             return
 
         asunto = f"Documento Firmado: {self.nombre_doc}"
         cuerpo = (
-            f"Estimado/a,\n\n"
-            f"Adjunto encontrará el documento '{self.nombre_doc}' con las páginas firmadas.\n\n"
+            "Estimado/a,\n\n"
+            f"Adjunto encontrará el documento '{self.nombre_doc}' con las "
+            "páginas firmadas.\n\n"
             "Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
         )
 
         try:
-            _abrir_explorador_temp(copia_temp.parent)
+            abrir_en_sistema(copia_temp.parent)
             _abrir_mailto(destinatario, asunto, cuerpo)
-        except Exception as e:
-            QMessageBox.critical(
-                self, "Error al abrir",
-                f"No se pudo abrir el correo o la carpeta:\n\n{e}"
-            )
-            self.btn_abrir.setText("✉️  Abrir correo y carpeta")
-            self.btn_abrir.setEnabled(True)
+        except Exception as e:                       # noqa: BLE001
+            QMessageBox.critical(self, "Error al abrir",
+                                 f"No se pudo abrir el correo o la carpeta:\n\n{e}")
+            self._restablecer_boton()
             return
 
+        _ULTIMO_DESTINATARIO = destinatario
         self.accept()
+
+    def _restablecer_boton(self):
+        self.btn_abrir.setText("✉️  Abrir correo y carpeta")
+        self.btn_abrir.setEnabled(True)
 
 
 # ── API pública ───────────────────────────────────────────────────────────────

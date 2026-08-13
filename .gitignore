@@ -7,9 +7,19 @@ venv/
 .idea/
 .vscode/
 *.log
+
+# Carpetas de trabajo de la app
+/pdfs_trabajo/
+/pdfs_firmados/
 /documents/
 /scans/
 /temp/
 *.pdf
+
+# Build
 /build/
 /dist/
+
+# Configuración local: la escribe el diálogo de Ajustes y puede contener
+# credenciales. Se versiona config.example.json en su lugar.
+config.json
