@@ -1,7 +1,7 @@
 """
 modules/settings.py
 ============================================================
-Diálogo de Ajustes — cuenta de correo emisor.
+Diálogo de Ajustes — correo emisor y actualizaciones.
 
 Notas
 -----
@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -35,6 +36,7 @@ from PyQt6.QtWidgets import (
 
 from modules.setup import guardar_config
 from modules.theme import SIZE, SPACE
+from modules.version import __version__
 from modules.ui import (
     AreaScroll,
     FilaAdaptable,
@@ -55,12 +57,16 @@ SMTP_PRESETS = {
 class DialogoAjustes(QDialog):
     """Ventana modal de ajustes. Lee y escribe config.json."""
 
+    # La ventana principal es la que sabe buscar actualizaciones; el
+    # diálogo sólo pide que lo haga.
+    buscar_actualizaciones = pyqtSignal()
+
     def __init__(self, config_path: Path, config: dict, parent=None):
         super().__init__(parent)
         self.config_path = config_path
         self.config = dict(config)
 
-        self.setWindowTitle("Ajustes — Correo emisor")
+        self.setWindowTitle("Ajustes")
         self.setObjectName("pantalla")
         # Mínimo chico (entra en pantallas bajas gracias al scroll) pero
         # tamaño inicial cómodo, que muestra el formulario completo.
@@ -84,9 +90,9 @@ class DialogoAjustes(QDialog):
         root = area.lay
 
         # Encabezado
-        root.addWidget(etiqueta("Ajustes de correo", rol="titulo"))
+        root.addWidget(etiqueta("Ajustes", rol="titulo"))
         root.addWidget(etiqueta(
-            "Configurá la cuenta desde la cual se envían los documentos firmados.",
+            "Cuenta de correo emisor y preferencias de la aplicación.",
             rol="hint", wrap=True))
         root.addSpacing(SPACE["sm"])
         root.addWidget(separador())
@@ -148,6 +154,27 @@ class DialogoAjustes(QDialog):
         root.addWidget(separador())
         root.addSpacing(SPACE["sm"])
 
+        # Actualizaciones
+        root.addWidget(etiqueta("ACTUALIZACIONES", rol="seccion"))
+        self.chk_actualizaciones = QCheckBox(
+            "Avisarme cuando haya una versión nueva")
+        self.chk_actualizaciones.setToolTip(
+            "Consulta una vez por día si hay una versión publicada.\n"
+            "Nunca instala nada sin tu confirmación.")
+        root.addWidget(self.chk_actualizaciones)
+
+        fila_upd = QHBoxLayout()
+        fila_upd.setSpacing(SPACE["sm"])
+        fila_upd.addWidget(etiqueta(f"Versión instalada: {__version__}", rol="hint"))
+        fila_upd.addStretch()
+        fila_upd.addWidget(boton("Buscar ahora", variant="ghost",
+                                 height=SIZE["btn_sm"], compacto=True,
+                                 on_click=self._buscar_ahora))
+        root.addLayout(fila_upd)
+        root.addSpacing(SPACE["md"])
+        root.addWidget(separador())
+        root.addSpacing(SPACE["sm"])
+
         # Servidor SMTP
         root.addWidget(etiqueta("SERVIDOR SMTP", rol="seccion"))
         form_smtp = QFormLayout()
@@ -186,11 +213,19 @@ class DialogoAjustes(QDialog):
         raiz.addWidget(pie)
 
     # ── Helpers internos ──────────────────────────────────────────────────
+    def _buscar_ahora(self):
+        # Guardamos primero para que el interruptor recién tocado valga ya
+        self.config["actualizaciones_automaticas"] = \
+            self.chk_actualizaciones.isChecked()
+        self.buscar_actualizaciones.emit()
+
     def _toggle_password(self, visible: bool):
         self.input_password.setEchoMode(
             QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
 
     def _cargar_valores(self):
+        self.chk_actualizaciones.setChecked(
+            bool(self.config.get("actualizaciones_automaticas", True)))
         self.input_email.setText(self.config.get("email_user", ""))
         self.input_password.setText(self.config.get("email_password", ""))
 
@@ -247,6 +282,8 @@ class DialogoAjustes(QDialog):
             self.input_servidor.setFocus()
             return
 
+        self.config["actualizaciones_automaticas"] = \
+            self.chk_actualizaciones.isChecked()
         self.config["email_user"] = email
         self.config["email_password"] = self.input_password.text()
         self.config["smtp_server"] = servidor

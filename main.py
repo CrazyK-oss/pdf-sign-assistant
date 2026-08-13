@@ -235,10 +235,15 @@ class VentanaPrincipal(QMainWindow):
         self._vista_escaneo = None
         self._vista_guardar = None
 
+        self._worker_update = None
         self._build_ui()
         self._registrar_atajos()
         self._recargar_guardados()
         self._vigilar_carpeta()
+
+        # Comprobación diferida: que la ventana abra primero. Buscar
+        # actualizaciones nunca debe retrasar el arranque.
+        QTimer.singleShot(3000, self._comprobar_actualizaciones_auto)
 
     # ── Cierre de la app ──────────────────────────────────────────────────
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
@@ -494,12 +499,96 @@ class VentanaPrincipal(QMainWindow):
     def _abrir_ajustes(self):
         from modules.settings import DialogoAjustes
         dlg = DialogoAjustes(config_path=CONFIG_PATH, config=self.config, parent=self)
+        dlg.buscar_actualizaciones.connect(
+            lambda: self._comprobar_actualizaciones(manual=True))
         if dlg.exec():
             # Conservamos el tema actual: el diálogo no lo edita.
             dlg.config["tema"] = self.config.get("tema", current_mode())
             self.config = dlg.config
             self.status.showMessage(
                 f"Ajustes guardados — correo: {self.config.get('email_user', '')}")
+
+    # ── Actualizaciones ───────────────────────────────────────────────────
+    def _comprobar_actualizaciones_auto(self):
+        """Comprobación silenciosa al arrancar (como mucho, una vez por día)."""
+        from modules.actualizador import toca_comprobar
+
+        if not toca_comprobar(self.config):
+            return
+        self._comprobar_actualizaciones(manual=False)
+
+    def _comprobar_actualizaciones(self, manual: bool = False):
+        """Consulta si hay versión nueva.
+
+        `manual` distingue el pedido explícito del usuario (que espera
+        una respuesta aunque sea "ya estás al día") de la comprobación
+        automática, que sólo habla si hay algo que decir.
+        """
+        from modules.actualizador import (
+            REPO_DEFECTO, WorkerComprobar, marcar_comprobacion,
+        )
+
+        if self._worker_update is not None and self._worker_update.isRunning():
+            return
+
+        if manual:
+            self.status.showMessage("Buscando actualizaciones…")
+
+        marcar_comprobacion(self.config)
+        try:
+            guardar_config(self.config, CONFIG_PATH)
+        except OSError:
+            pass
+
+        # El repositorio es configurable: permite apuntar a un servidor
+        # interno que exponga la misma forma de respuesta.
+        self._worker_update = WorkerComprobar(
+            self.config.get("repo_actualizaciones") or REPO_DEFECTO)
+        self._worker_update.resultado.connect(
+            lambda info: self._on_resultado_update(info, manual))
+        self._worker_update.start()
+
+    def _on_resultado_update(self, info, manual: bool):
+        from modules.actualizador import (
+            DialogoActualizacion, esta_ignorada, hay_version_nueva,
+        )
+
+        if info is None:
+            if manual:
+                QMessageBox.information(
+                    self, "Sin conexión",
+                    "No se pudo consultar si hay actualizaciones.\n\n"
+                    "Revisá tu conexión a internet y volvé a intentarlo.")
+                self.status.showMessage("No se pudo buscar actualizaciones.")
+            return
+
+        if not hay_version_nueva(__version__, info.version):
+            if manual:
+                QMessageBox.information(
+                    self, "Todo al día",
+                    f"Ya tenés la última versión ({__version__}).")
+            self.status.showMessage(f"Versión {__version__} — al día.")
+            return
+
+        # En la comprobación automática respetamos el "omitir esta versión";
+        # si la pidió el usuario, se la mostramos igual.
+        if not manual and esta_ignorada(self.config, info.version):
+            return
+
+        log.info("Actualización disponible: %s → %s", __version__, info.version)
+        self.status.showMessage(f"Actualización disponible: {info.version}")
+
+        dlg = DialogoActualizacion(info, parent=self)
+        dlg.omitir_version.connect(self._omitir_version)
+        dlg.exec()
+
+    def _omitir_version(self, version: str):
+        self.config["version_ignorada"] = version
+        try:
+            guardar_config(self.config, CONFIG_PATH)
+        except OSError:
+            pass
+        self.status.showMessage(f"No se volverá a avisar de la versión {version}.")
 
     # ── Abrir PDF ─────────────────────────────────────────────────────────
     def abrir_pdf(self):

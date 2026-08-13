@@ -433,6 +433,21 @@ QPushButton[variant="ghost"]:checked {{
     border-color: {p['primary']};
 }}
 
+/* ═══ Checkbox ═══════════════════════════════════════════════════════════════ */
+QCheckBox {{
+    spacing: 8px;
+    color: {p['text']};
+    font-size: {f['body']}px;
+    background: transparent;
+}}
+/* El indicador se deja al estilo nativo: al pintarle un fondo propio,
+   Qt deja de dibujar el tilde y quedaba un cuadrado lleno, ambiguo.
+   El color de marcado sale de la QPalette (Highlight = primary). */
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+}}
+
 /* ═══ Tarjetas y contenedores ════════════════════════════════════════════════ */
 QFrame#card {{
     background-color: {p['surface']};

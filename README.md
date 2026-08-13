@@ -27,6 +27,19 @@ señal de que el archivo esté mal. Para continuar:
 
 Si querés verificar la descarga, cada Release publica un `SHA256SUMS.txt`.
 
+### Actualizaciones
+
+Una vez instalada, **no hace falta volver a descargar nada**: la app consulta
+una vez por día si hay versión nueva y te avisa. Si aceptás, descarga el
+instalador, verifica su integridad y se actualiza sola — se cierra, se
+actualiza y se vuelve a abrir.
+
+Se puede desactivar en **⚙ Ajustes → Actualizaciones**, donde también está el
+botón **Buscar ahora**.
+
+> Nunca se instala nada sin tu confirmación: la comprobación es automática, la
+> instalación no.
+
 ### Dónde quedan tus archivos
 
 | Qué | Dónde |
@@ -65,6 +78,7 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 - ⌨️ **Atajos de teclado** — flujo completo sin mouse (ver tabla más abajo)
 - 🔎 **Búsqueda en guardados** — filtrá el historial por nombre a medida que escribís
 - 🧾 **Registro en el propio PDF** — el documento guarda qué páginas se firmaron, así al reabrirlo o enviarlo el resumen es exacto
+- 🔔 **Actualizador interno** — la app avisa cuando hay versión nueva y se actualiza sola, sin pasar por GitHub ni reinstalar a mano
 - 📋 **Log en archivo** — `logs/pdf_sign_assistant.log` con rotación, para diagnosticar problemas en la PC del usuario
 - 🔒 **Cancelación segura** — cancelá en cualquier etapa sin corromper el archivo original
 
@@ -116,6 +130,7 @@ pdf-sign-assistant/
     ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
     ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── version.py           # Única fuente de verdad de la versión (app, instalador y CI la leen de acá)
+    ├── actualizador.py      # Actualizador interno: consulta, descarga verificada e instalación silenciosa
     ├── settings.py          # Diálogo de ajustes de correo emisor (SMTP, credenciales)
     ├── fase1_preview.py     # Cuadrícula de miniaturas y selección de página
     ├── fase2_print.py       # Integración con la impresora del sistema
@@ -328,6 +343,18 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 
 ## Changelog
 
+### v0.9 — Actualizador interno *(actual)*
+
+- **La app se actualiza sola.** Consulta una vez por día si hay versión nueva, avisa con las notas del Release renderizadas, y si el usuario acepta: descarga el instalador, **verifica su SHA-256** contra el `SHA256SUMS.txt` publicado, y lo ejecuta en silencio. Inno Setup cierra la app, actualiza y la vuelve a abrir
+- Esto es posible **porque el instalador no pide permisos de administrador**: instalando en `Program Files` cada actualización mostraría un cartel de UAC y la actualización silenciosa sería inviable
+- **Nunca instala nada sin confirmación**: automática es la comprobación, no la instalación
+- **Falla en silencio**: una PC sin internet, detrás de un proxy o con el firewall cerrado no ve un error cada vez que abre la aplicación
+- Opciones por versión: **"Ahora no"** y **"Omitir esta versión"** (que igual vuelve a avisar en la siguiente)
+- En **modo portable** no se ofrece instalar —no hay instalador que correr—, sólo se enlaza la descarga
+- Nuevo interruptor en **Ajustes → Actualizaciones**, con botón *Buscar ahora* y la versión instalada a la vista
+- El repositorio es configurable, por si conviene apuntar a un servidor interno
+- **38 tests nuevos** sobre comparación de versiones, política de comprobación y lectura de la respuesta del servidor (con datos falsos, sin salir a internet). Cubren el caso que rompe callado: que `1.9.0` no se considere posterior a `1.10.0` por comparar como texto
+
 ### v0.8 — Distribución: instalador, CI y rutas de usuario *(actual)*
 
 **La app ya se puede instalar de verdad**
@@ -469,6 +496,10 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - Hacer doble clic en un documento guardado lo reabre para re-editar sin modificar el original.
 - Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.
 - La conversión imagen → PDF intenta tres motores en orden: **reportlab** → **img2pdf** (en subproceso aislado, porque puede crashear a nivel de extensión C) → **Pillow**.
+- El actualizador **verifica el SHA-256** del instalador descargado contra el `SHA256SUMS.txt` del Release antes de ejecutarlo. Eso protege la integridad de la descarga (corrupción, intercepción), pero no cubre un repositorio comprometido: para eso hace falta firma de código.
+- La actualización silenciosa es posible **porque el instalador no pide permisos de administrador**. Si instalara en `Program Files`, cada actualización dispararía un cartel de UAC.
+- La comprobación de actualizaciones se espacia 24 h y se hace 3 segundos después de abrir la app, para no retrasar el arranque. Falla en silencio si no hay internet o hay un proxy de por medio.
+- El repositorio de actualizaciones es configurable (`repo_actualizaciones` en `config.json`), por si algún día conviene apuntar a un servidor interno.
 - La app **no escribe junto al ejecutable**: config y logs van a `%LOCALAPPDATA%\PDF Sign Assistant` y los documentos a `Documentos\PDF Sign Assistant`. Eso es lo que permite instalarla en `Program Files`, que es de sólo lectura sin permisos de administrador. Un `portable.txt` junto al ejecutable vuelve al comportamiento anterior (todo al lado de la app).
 - La ventana principal vigila la carpeta de documentos firmados con `QFileSystemWatcher`: si agregás o borrás archivos desde el Explorador, la lista se actualiza sola.
 - Las páginas firmadas quedan registradas en los metadatos del PDF, bajo la clave `/PSAPaginas` (índices 0-based separados por coma). Los documentos firmados con versiones anteriores no la tienen: en ese caso el resumen del correo indica "no registradas".

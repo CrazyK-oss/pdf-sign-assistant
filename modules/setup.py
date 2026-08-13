@@ -140,6 +140,10 @@ CONFIG_DEFAULT: dict = {
     "smtp_server": "smtp.gmail.com",
     "smtp_port": 587,
     "tema": "light",
+    # Actualizador interno
+    "actualizaciones_automaticas": True,
+    "ultima_comprobacion": "",
+    "version_ignorada": "",
 }
 
 

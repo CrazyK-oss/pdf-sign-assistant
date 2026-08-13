@@ -63,6 +63,15 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 
+; Actualización desde la propia app (modules/actualizador.py):
+; el instalador se ejecuta con /SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS.
+; El Restart Manager cierra la app en uso, reemplaza los archivos y la
+; vuelve a abrir. UsePreviousAppDir (activo por defecto) garantiza que
+; la actualización caiga en la MISMA carpeta que la instalación previa.
+CloseApplications=yes
+RestartApplications=yes
+UsePreviousAppDir=yes
+
 LicenseFile=..\LICENSE
 
 [Languages]
