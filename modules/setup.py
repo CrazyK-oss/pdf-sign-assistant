@@ -1,14 +1,32 @@
 """
 modules/setup.py
 ============================================================
-Utilidades de arranque: rutas base, carpetas de trabajo y
+Utilidades de arranque: rutas de la app, carpetas de trabajo y
 lectura/escritura de config.json.
 
-Compatible con ejecución directa (python main.py) y con binarios
-generados por PyInstaller (bundle congelado).
+Dónde escribe la app
+--------------------
+Antes todo (config, logs, PDFs) se guardaba JUNTO AL .exe. Eso funciona
+mientras la app vive en una carpeta del usuario, pero se rompe apenas se
+instala en `C:\\Program Files`: esa ruta es de sólo lectura sin permisos
+de administrador, así que fallarían los ajustes, el log y el guardado.
 
-Acá vive la ÚNICA implementación de carga/guardado de configuración:
-antes main.py y settings.py tenían cada uno la suya.
+Reparto estándar de Windows:
+  - Config y logs → %LOCALAPPDATA%\\PDF Sign Assistant
+  - Copias de trabajo → %LOCALAPPDATA%\\PDF Sign Assistant\\pdfs_trabajo
+  - Documentos firmados → Documentos\\PDF Sign Assistant  (los busca el
+    usuario, así que van donde sabe encontrarlos)
+
+Modo portable
+-------------
+Si existe un archivo `portable.txt` junto al ejecutable, se vuelve al
+comportamiento anterior y todo queda al lado de la app: útil para
+llevarla en un pendrive.
+
+Migración
+---------
+Si se encuentran datos de una versión anterior junto al ejecutable, se
+mueven a la ubicación nueva la primera vez. Nadie pierde sus documentos.
 """
 
 from __future__ import annotations
@@ -16,28 +34,103 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
+import shutil
 import sys
 from pathlib import Path
 
+APP_NOMBRE = "PDF Sign Assistant"
 
-# ── Directorio base ───────────────────────────────────────────────────────────
+
+# ── Directorio base (recursos que viajan con la app) ──────────────────────────
 def get_base_dir() -> Path:
     """
     Devuelve el directorio base de la aplicación.
     - Con PyInstaller (frozen): carpeta del .exe
     - Como script normal: carpeta del proyecto
+
+    Sirve para LEER recursos empaquetados. Para ESCRIBIR, usar
+    directorio_datos() / directorio_documentos().
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).parent.parent
 
 
-BASE_DIR = get_base_dir()
-CONFIG_PATH = BASE_DIR / "config.json"
+def es_portable() -> bool:
+    """True si hay un portable.txt junto a la app (todo queda al lado)."""
+    try:
+        return (get_base_dir() / "portable.txt").is_file()
+    except OSError:
+        return False
 
-CARPETA_TRABAJO = BASE_DIR / "pdfs_trabajo"
-CARPETA_FIRMADO = BASE_DIR / "pdfs_firmados"
-CARPETA_LOGS    = BASE_DIR / "logs"
+
+def _carpeta_documentos_usuario() -> Path:
+    """Carpeta 'Documentos' real del usuario.
+
+    En Windows se consulta a la API (SHGetKnownFolderPath) en vez de
+    asumir ~/Documents: la carpeta puede estar redirigida a OneDrive o a
+    una unidad de red, y ahí el atajo ingenuo crearía una carpeta suelta
+    en el perfil que el usuario nunca encontraría.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes
+
+            # FOLDERID_Documents
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", ctypes.c_uint32),
+                    ("Data2", ctypes.c_uint16),
+                    ("Data3", ctypes.c_uint16),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            folderid = GUID(
+                0xFDD39AD0, 0x238F, 0x46AF,
+                (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+            )
+            ruta = ctypes.c_wchar_p()
+            resultado = ctypes.windll.shell32.SHGetKnownFolderPath(  # type: ignore[attr-defined]
+                ctypes.byref(folderid), 0, None, ctypes.byref(ruta))
+            if resultado == 0 and ruta.value:
+                destino = Path(ruta.value)
+                ctypes.windll.ole32.CoTaskMemFree(ruta)  # type: ignore[attr-defined]
+                return destino
+        except Exception:
+            pass
+    return Path.home() / "Documents"
+
+
+def directorio_datos() -> Path:
+    """Carpeta para config, logs y copias de trabajo (no visible al usuario)."""
+    if es_portable():
+        return get_base_dir()
+
+    if sys.platform == "win32":
+        raiz = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        raiz = Path.home() / "Library" / "Application Support"
+    else:
+        raiz = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(raiz) / APP_NOMBRE
+
+
+def directorio_documentos() -> Path:
+    """Carpeta donde quedan los PDFs firmados (visible para el usuario)."""
+    if es_portable():
+        return get_base_dir() / "pdfs_firmados"
+    return _carpeta_documentos_usuario() / APP_NOMBRE
+
+
+BASE_DIR = get_base_dir()
+DIR_DATOS = directorio_datos()
+
+CONFIG_PATH     = DIR_DATOS / "config.json"
+CARPETA_TRABAJO = DIR_DATOS / "pdfs_trabajo"
+CARPETA_LOGS    = DIR_DATOS / "logs"
+CARPETA_FIRMADO = directorio_documentos()
 FOLDERS = (CARPETA_TRABAJO, CARPETA_FIRMADO)
 
 # Valores por defecto de la configuración
@@ -50,10 +143,76 @@ CONFIG_DEFAULT: dict = {
 }
 
 
+def migrar_datos_antiguos(candidatos=None) -> list[str]:
+    """Mueve datos de versiones anteriores (guardados junto al .exe) a las
+    ubicaciones nuevas. Devuelve una lista de lo migrado, para el log.
+
+    Nunca pisa datos nuevos con viejos: si el destino ya existe, sólo se
+    trasladan los elementos que allá todavía no están. Si algo falla, se
+    sigue de largo — la app tiene que arrancar igual.
+
+    `candidatos` es una secuencia de pares (origen, destino); por defecto
+    usa las rutas reales de la app. Se puede pasar explícitamente para
+    poder testear la migración sin tocar el sistema del usuario.
+    """
+    if candidatos is None:
+        if es_portable():
+            return []
+        candidatos = (
+            (BASE_DIR / "config.json",    CONFIG_PATH),
+            (BASE_DIR / "pdfs_trabajo",   CARPETA_TRABAJO),
+            (BASE_DIR / "logs",           CARPETA_LOGS),
+            (BASE_DIR / "pdfs_firmados",  CARPETA_FIRMADO),
+        )
+
+    movidos: list[str] = []
+    for origen, destino in candidatos:
+        try:
+            if not origen.exists() or origen.resolve() == destino.resolve():
+                continue
+
+            if not destino.exists():
+                destino.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(origen), str(destino))
+                movidos.append(f"{origen.name} → {destino}")
+                continue
+
+            # El destino ya existe: movemos el contenido pieza por pieza
+            # sin pisar nada que ya esté del otro lado.
+            if origen.is_dir() and destino.is_dir():
+                for hijo in list(origen.iterdir()):
+                    objetivo = destino / hijo.name
+                    if objetivo.exists():
+                        continue
+                    shutil.move(str(hijo), str(objetivo))
+                    movidos.append(f"{hijo.name} → {destino}")
+                try:
+                    origen.rmdir()      # sólo si quedó vacía
+                except OSError:
+                    pass
+        except Exception:                            # noqa: BLE001
+            continue
+    return movidos
+
+
 def setup_directories() -> Path:
-    """Crea las carpetas necesarias si no existen. Devuelve el directorio base."""
+    """Migra datos de versiones anteriores y crea las carpetas necesarias.
+
+    La migración va PRIMERO: si creáramos las carpetas antes, el destino
+    ya existiría y la migración se saltearía siempre, dejando los datos
+    viejos huérfanos junto al ejecutable.
+    """
+    migrados = migrar_datos_antiguos()
+
     for path in FOLDERS:
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+    if migrados:
+        logging.getLogger(__name__).info(
+            "Datos migrados a las ubicaciones nuevas: %s", "; ".join(migrados))
     return BASE_DIR
 
 

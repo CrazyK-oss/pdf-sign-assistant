@@ -2,6 +2,42 @@
 
 > Aplicación de escritorio en Python + PyQt6 para automatizar el flujo completo de firma de documentos legales — diseñada para usuarios no técnicos con una interfaz clara, guiada y con soporte de modo claro/oscuro.
 
+<p align="center">
+  <img src="assets/icon.png" width="120" alt="PDF Sign Assistant">
+</p>
+
+---
+
+## ⬇️ Descargar
+
+**[Descargar la última versión](https://github.com/CrazyK-oss/pdf-sign-assistant/releases/latest)** · Windows 10 u 11
+
+| Archivo | Para quién |
+|---------|-----------|
+| `PDFSignAssistant-X.Y.Z-Setup.exe` | **La mayoría.** No pide permisos de administrador y crea el acceso directo. |
+| `PDFSignAssistant-X.Y.Z-portable.zip` | Sin instalar nada (por ejemplo, desde un pendrive). Descomprimir y ejecutar. |
+
+### La primera vez, Windows va a advertirte
+
+La aplicación **no está firmada digitalmente**, así que SmartScreen muestra
+*"Windows protegió su PC"*. Es lo esperable en software sin certificado, no una
+señal de que el archivo esté mal. Para continuar:
+
+**Más información → Ejecutar de todas formas**
+
+Si querés verificar la descarga, cada Release publica un `SHA256SUMS.txt`.
+
+### Dónde quedan tus archivos
+
+| Qué | Dónde |
+|-----|-------|
+| Documentos firmados | `Documentos\PDF Sign Assistant` |
+| Configuración y logs | `%LOCALAPPDATA%\PDF Sign Assistant` |
+
+Al desinstalar, **tus documentos no se borran**. Si venías de una versión
+anterior que guardaba todo junto al ejecutable, la app mueve esos datos a las
+carpetas nuevas la primera vez que arranca.
+
 ---
 
 ## Descripción
@@ -61,21 +97,25 @@ que ya habías hecho.
 ```
 pdf-sign-assistant/
 ├── main.py                  # Punto de entrada · ventana principal · orquestación del flujo
+├── LICENSE                  # MIT
+├── assets/icon.ico          # Icono de la app y del instalador
+├── installer/               # Script de Inno Setup (genera el Setup.exe)
+├── tests/                   # Tests de lógica pura (corren en CI, sin Qt)
+├── .github/workflows/       # CI en cada push · Release al crear un tag
 ├── config.json              # Configuración local (NO versionada — la escribe Ajustes)
 ├── config.example.json      # Plantilla de configuración
 ├── config.example.env       # Plantilla de variables de entorno
 ├── requirements.txt         # Dependencias de Python
 ├── pdf_sign_assistant.spec  # Configuración de PyInstaller para generar el .exe
-├── pdfs_trabajo/            # Copias de trabajo temporales (auto-creado, gitignored)
-├── logs/                    # Log rotativo de la aplicación (auto-creado, gitignored)
-├── pdfs_firmados/           # Documentos firmados finales (auto-creado, gitignored)
-│   └── _envio_temp/         # Carpeta temporal para adjuntar en correos (se borra al cerrar la app)
+│                            # (en ejecución, los datos NO se guardan acá:
+│                            #  ver la tabla de "Dónde quedan tus archivos")
 └── modules/
     ├── __init__.py
     ├── setup.py             # Rutas compatibles con PyInstaller + carga/guardado de config
     ├── theme.py             # Sistema de diseño: paletas, tokens (espaciado/radios/tipografía), stylesheet
     ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
     ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
+    ├── version.py           # Única fuente de verdad de la versión (app, instalador y CI la leen de acá)
     ├── settings.py          # Diálogo de ajustes de correo emisor (SMTP, credenciales)
     ├── fase1_preview.py     # Cuadrícula de miniaturas y selección de página
     ├── fase2_print.py       # Integración con la impresora del sistema
@@ -140,7 +180,10 @@ desmarca, `Esc` cierra.
 
 ---
 
-## Instalación
+## Instalación desde el código (desarrollo)
+
+> Si sólo querés **usar** la app, no necesitás nada de esto: bajá el instalador
+> desde [Releases](https://github.com/CrazyK-oss/pdf-sign-assistant/releases/latest).
 
 ```bash
 # 1. Clonar el repositorio
@@ -218,9 +261,53 @@ pip install pyinstaller
 pyinstaller pdf_sign_assistant.spec
 ```
 
-El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la carpeta completa**, nunca solo el `.exe`.
+El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuí **siempre la carpeta completa**, nunca solo el `.exe`.
 
 > **Nota:** Si PyInstaller no encuentra `python3XX.dll`, el `.spec` incluye lógica para localizarla automáticamente usando `sys.base_exec_prefix` (funciona correctamente dentro de entornos virtuales).
+
+---
+
+## Publicar una versión
+
+El build no se hace a mano: lo hace GitHub Actions en un Windows limpio, así no
+hay "en mi máquina andaba".
+
+```bash
+# 1. Subir el número de versión (única fuente de verdad)
+#    modules/version.py  →  __version__ = "0.8.0"
+
+# 2. Commitear y etiquetar
+git commit -am "release: v0.8.0"
+git tag v0.8.0
+git push origin main --tags
+```
+
+El workflow `.github/workflows/release.yml` corre los tests, compila con
+PyInstaller, arma el instalador con Inno Setup, genera el ZIP portable y los
+checksums, y publica todo en un Release nuevo. Si el tag no coincide con
+`modules/version.py`, **falla a propósito** antes de publicar nada.
+
+Para probar el build sin publicar: pestaña **Actions → Release → Run workflow**.
+Los artefactos quedan disponibles 14 días.
+
+### Sobre la firma de código
+
+Los binarios van **sin firmar**, así que Windows SmartScreen muestra una
+advertencia la primera vez. Es la principal fricción para un usuario no
+técnico. Para eliminarla hace falta un certificado de firma de código:
+
+| Tipo | Costo aprox. | Efecto |
+|------|-------------|--------|
+| Sin firma | — | SmartScreen advierte siempre |
+| OV | ~150-400 USD/año | Advierte hasta acumular reputación (semanas) |
+| EV | ~300-600 USD/año | Sin advertencia desde el día uno |
+
+Cuando haya certificado, se agrega un paso de `signtool` en el workflow entre
+el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
+
+> **Detalle relevante:** el `.spec` usa `upx=False` a propósito. UPX achica el
+> binario pero dispara falsos positivos de antivirus en ejecutables de
+> PyInstaller, que es exactamente lo que no querés al distribuir.
 
 ---
 
@@ -240,6 +327,28 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 ---
 
 ## Changelog
+
+### v0.8 — Distribución: instalador, CI y rutas de usuario *(actual)*
+
+**La app ya se puede instalar de verdad**
+- **Instalador Inno Setup** (`installer/`): un `Setup.exe` con acceso directo y desinstalador. Instala en la carpeta del usuario con `PrivilegesRequired=lowest`, así **no aparece el cartel de UAC** — pedir permisos de administrador para una app que no toca el sistema es fricción que hace abandonar
+- **ZIP portable** para usar desde un pendrive, sin instalar nada
+- **GitHub Actions**: `ci.yml` corre lint y tests en cada push; `release.yml` compila en un Windows limpio al crear un tag `vX.Y.Z`, arma instalador + ZIP + checksums SHA256 y publica el Release. Si el tag no coincide con `modules/version.py`, falla antes de publicar
+- **LICENSE MIT**: sin licencia, legalmente nadie podía usar ni redistribuir la app
+- **Icono propio** en el ejecutable, la ventana y el instalador, y **propiedades de versión** en el `.exe` (antes aparecía sin nombre ni versión, lo que además alimenta las alertas de SmartScreen)
+
+**Fix bloqueante para instalar en Program Files**
+- La app escribía config, logs y PDFs **junto al ejecutable**. Instalada en `C:\Program Files` —que es de sólo lectura sin admin— habría fallado al guardar ajustes, escribir el log y guardar el documento firmado. Ahora:
+  - Config y logs → `%LOCALAPPDATA%\PDF Sign Assistant`
+  - Documentos firmados → `Documentos\PDF Sign Assistant`
+  - La carpeta Documentos se resuelve con la API de Windows (`SHGetKnownFolderPath`), no asumiendo `~/Documents`: puede estar redirigida a OneDrive o a una unidad de red
+- **Migración automática**: quien venía de una versión anterior no pierde nada — sus documentos y su configuración se mueven solos la primera vez. Nunca pisa datos nuevos con viejos
+- **Modo portable** con un `portable.txt` junto al ejecutable, que vuelve al comportamiento anterior
+
+**Calidad**
+- **49 tests** en `tests/`, de lógica pura (sin Qt ni pantalla), corriendo en CI: modelo de dominio, configuración, rutas y migración
+- `upx=False` en el `.spec`: UPX achica el binario pero **dispara falsos positivos de antivirus** en ejecutables de PyInstaller
+- README reescrito de cara al usuario: sección de descarga arriba de todo, qué hacer con la advertencia de SmartScreen y dónde quedan sus archivos
 
 ### v0.7 — Firma de varias páginas por sesión *(actual)*
 
@@ -360,7 +469,8 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 - Hacer doble clic en un documento guardado lo reabre para re-editar sin modificar el original.
 - Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.
 - La conversión imagen → PDF intenta tres motores en orden: **reportlab** → **img2pdf** (en subproceso aislado, porque puede crashear a nivel de extensión C) → **Pillow**.
-- La ventana principal vigila `pdfs_firmados/` con `QFileSystemWatcher`: si agregás o borrás archivos desde el Explorador, la lista se actualiza sola.
+- La app **no escribe junto al ejecutable**: config y logs van a `%LOCALAPPDATA%\PDF Sign Assistant` y los documentos a `Documentos\PDF Sign Assistant`. Eso es lo que permite instalarla en `Program Files`, que es de sólo lectura sin permisos de administrador. Un `portable.txt` junto al ejecutable vuelve al comportamiento anterior (todo al lado de la app).
+- La ventana principal vigila la carpeta de documentos firmados con `QFileSystemWatcher`: si agregás o borrás archivos desde el Explorador, la lista se actualiza sola.
 - Las páginas firmadas quedan registradas en los metadatos del PDF, bajo la clave `/PSAPaginas` (índices 0-based separados por coma). Los documentos firmados con versiones anteriores no la tienen: en ese caso el resumen del correo indica "no registradas".
 - La rotación de una hoja escaneada **no modifica la imagen original**: se aplica sobre una copia temporal al momento de generar el PDF.
 - Si la app se cierra de golpe, las copias de trabajo quedan en `pdfs_trabajo/`; las de más de 7 días se borran solas en el siguiente arranque.

@@ -40,6 +40,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QIcon,
     QKeySequence,
     QShortcut,
 )
@@ -72,6 +73,7 @@ except Exception:
 
 from modules.fase1_preview import VistaPrevisualizacion
 from modules.setup import (
+    BASE_DIR,
     CARPETA_FIRMADO,
     CARPETA_TRABAJO,
     CONFIG_PATH,
@@ -83,6 +85,7 @@ from modules.setup import (
 )
 from modules.theme import SPACE, THEME, apply_theme, current_mode
 from modules.trabajo import TrabajoFirma
+from modules.version import APP_NOMBRE, __version__
 from modules.ui import (
     FilaAdaptable,
     abrir_en_sistema,
@@ -219,7 +222,7 @@ class _DelegadoDocumento(QStyledItemDelegate):
 class VentanaPrincipal(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PDF Sign Assistant")
+        self.setWindowTitle(f"{APP_NOMBRE}  v{__version__}")
         # Mínimo chico a propósito: la UI se adapta y no obliga a tener
         # una pantalla grande.
         self.setMinimumSize(460, 420)
@@ -819,12 +822,19 @@ def main():
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("PDF Sign Assistant")
+    app.setApplicationName(APP_NOMBRE)
+    app.setApplicationVersion(__version__)
+
+    icono = BASE_DIR / "assets" / "icon.png"
+    if icono.is_file():
+        app.setWindowIcon(QIcon(str(icono)))
 
     # El .exe se compila con console=False: sin log a archivo, cualquier
     # error en la máquina del usuario se perdía sin dejar rastro.
     archivo_log = configurar_logging()
-    log.info("── PDF Sign Assistant iniciado ──")
+    log.info("── %s v%s iniciado ──", APP_NOMBRE, __version__)
+    log.info("Datos en %s", CONFIG_PATH.parent)
+    log.info("Documentos firmados en %s", CARPETA_FIRMADO)
     log.info("Log en %s", archivo_log)
 
     huerfanos = limpiar_trabajos_huerfanos()
