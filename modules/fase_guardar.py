@@ -3,28 +3,35 @@ modules/fase_guardar.py
 =======================
 Fase final del flujo: confirmación y guardado del PDF modificado.
 
-Recibe:
-  - ruta_pdf    : Path del PDF de trabajo (en pdfs_trabajo/)
-  - ruta_imagen : str  ruta de la imagen resultante (PNG/BMP/JPG)
-  - num_pagina  : int  índice 0-based de la página a reemplazar
+Recibe un TrabajoFirma ya completo (todas las páginas elegidas con su
+imagen) y produce el PDF final en pdfs_firmados/.
 
 Emite:
-  - guardado_listo(Path)  → ruta del PDF final guardado en pdfs_firmados/
-  - cancelado()           → el usuario descartó la operación
+  - guardado_listo(Path)  → ruta del PDF final
+  - cancelado()           → el usuario volvió atrás
+
+Multipágina
+-----------
+El worker reemplaza TODAS las páginas del trabajo en una sola pasada de
+escritura, aplicando la rotación elegida en cada imagen. El progreso se
+reparte entre las páginas, así que con 10 hojas la barra avanza de a
+poco en vez de quedarse clavada.
+
+Al guardar se escriben metadatos con las páginas firmadas (`/PSAPaginas`).
+Eso permite que, al reabrir el documento más tarde para enviarlo por
+correo, el resumen diga las páginas reales en vez del "página 1" fijo
+que se mostraba antes.
 
 Correcciones que sostiene esta versión
 --------------------------------------
 * img2pdf corre en un SUBPROCESO aislado: puede crashear a nivel de
   extensión C (pikepdf/libjpeg), y ahí ningún try/except de Python
-  llega a atrapar nada. Si el subproceso muere, el proceso principal
-  sigue vivo y cae al fallback de Pillow.
-* BUGFIX NUEVO: ese subproceso se lanzaba con `sys.executable -c …`.
-  Dentro de un .exe de PyInstaller, sys.executable ES LA PROPIA APP,
-  así que "convertir la imagen" abría una segunda instancia del
-  programa. Ahora, en modo congelado, se salta img2pdf directamente.
+  llega a atrapar nada.
+* Ese subproceso NO se lanza en modo congelado: `sys.executable` dentro
+  de un .exe de PyInstaller es la propia app, así que "convertir la
+  imagen" abría una segunda instancia del programa.
 * La emisión de guardado_listo se difiere con QueuedConnection.
-* logging.basicConfig() ya no se llama al importar: era una librería
-  reconfigurando el logger raíz de toda la app en DEBUG.
+* logging.basicConfig() no se llama al importar.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
@@ -51,6 +58,7 @@ from PyQt6.QtWidgets import (
 )
 
 from modules.theme import SIZE, SPACE, repolish, theme_signals
+from modules.trabajo import TrabajoFirma, formatear_paginas
 from modules.ui import (
     AreaScroll,
     BarraInferior,
@@ -64,6 +72,9 @@ log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
 CARACTERES_INVALIDOS = set('/\\:*?"<>|')
+
+# Clave propia en el diccionario Info del PDF con las páginas firmadas
+CLAVE_META_PAGINAS = "/PSAPaginas"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -94,7 +105,6 @@ def _normalizar_modo_pillow(img):
       - CMYK y resto → RGB
     """
     modo = img.mode
-    log.debug("_normalizar_modo_pillow — modo original: %s", modo)
     if modo in ("RGB", "L"):
         return img
     if modo in ("RGBA", "PA"):
@@ -106,6 +116,33 @@ def _normalizar_modo_pillow(img):
     if modo == "LA":
         return img.convert("L")
     return img.convert("RGB")
+
+
+def aplicar_rotacion(ruta_imagen: str, grados: int) -> tuple[str, bool]:
+    """Devuelve (ruta, es_temporal) con la imagen ya rotada.
+
+    Rota en sentido horario para coincidir con lo que muestra la vista
+    previa (QTransform().rotate() gira en horario; PIL, en antihorario).
+    El archivo original nunca se toca: se escribe una copia temporal.
+    """
+    grados = int(grados) % 360
+    if grados == 0:
+        return ruta_imagen, False
+
+    from PIL import Image
+    with Image.open(ruta_imagen) as img:
+        rotada = img.rotate(-grados, expand=True)
+        rotada = _normalizar_modo_pillow(rotada)
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.close()
+        # Conserva el DPI para que la página resultante mida lo mismo
+        dpi = img.info.get("dpi")
+        if dpi:
+            rotada.save(tmp.name, "PNG", dpi=dpi)
+        else:
+            rotada.save(tmp.name, "PNG")
+    log.debug("Rotación %d° aplicada → %s", grados, tmp.name)
+    return tmp.name, True
 
 
 def _imagen_a_pdf_reportlab(ruta_imagen: str) -> str:
@@ -125,8 +162,6 @@ def _imagen_a_pdf_reportlab(ruta_imagen: str) -> str:
 
     ancho_pt = ancho_px * 72.0 / dpi_x
     alto_pt = alto_px * 72.0 / dpi_y
-    log.debug("reportlab: %dx%d px @ %s dpi → %.1fx%.1f pt",
-              ancho_px, alto_px, dpi, ancho_pt, alto_pt)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     tmp.close()
@@ -150,7 +185,6 @@ def _imagen_a_pdf_pillow(ruta_imagen: str) -> str:
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
         img.save(tmp.name, "PDF", resolution=150)
-    log.debug("Pillow: PDF guardado — %d bytes", Path(tmp.name).stat().st_size)
     return tmp.name
 
 
@@ -190,8 +224,7 @@ def _imagen_a_pdf_img2pdf(ruta_imagen: str) -> str:
         stderr = resultado.stderr.decode(errors="replace").strip()
         _borrar_si_existe(tmp_out.name)
         raise RuntimeError(
-            f"img2pdf terminó con código {resultado.returncode}. stderr: {stderr}"
-        )
+            f"img2pdf terminó con código {resultado.returncode}. stderr: {stderr}")
 
     if Path(tmp_out.name).stat().st_size == 0:
         _borrar_si_existe(tmp_out.name)
@@ -207,105 +240,168 @@ def _borrar_si_existe(ruta: str | None) -> None:
         pass
 
 
-def _convertir_imagen_a_pdf(ruta_imagen: str) -> str:
-    """Intenta reportlab → img2pdf (subproceso) → Pillow, en ese orden."""
-    for nombre, motor in (
-        ("reportlab", _imagen_a_pdf_reportlab),
-        ("img2pdf", _imagen_a_pdf_img2pdf),
-    ):
-        try:
-            ruta = motor(ruta_imagen)
-            log.debug("Conversión con %s OK → %s", nombre, ruta)
-            return ruta
-        except ImportError:
-            log.debug("%s no disponible, probando el siguiente motor", nombre)
-        except Exception as e:                       # noqa: BLE001
-            log.warning("%s falló (%s: %s) — probando el siguiente motor",
-                        nombre, type(e).__name__, e)
+def _convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0) -> str:
+    """Convierte una imagen (con su rotación) a un PDF de una página.
 
-    log.debug("Usando Pillow como último fallback")
-    return _imagen_a_pdf_pillow(ruta_imagen)
+    Intenta reportlab → img2pdf (subproceso) → Pillow, en ese orden.
+    """
+    ruta_rotada, temporal = aplicar_rotacion(ruta_imagen, rotacion)
+    try:
+        for nombre, motor in (
+            ("reportlab", _imagen_a_pdf_reportlab),
+            ("img2pdf", _imagen_a_pdf_img2pdf),
+        ):
+            try:
+                ruta = motor(ruta_rotada)
+                log.debug("Conversión con %s OK → %s", nombre, ruta)
+                return ruta
+            except ImportError:
+                log.debug("%s no disponible, probando el siguiente motor", nombre)
+            except Exception as e:                   # noqa: BLE001
+                log.warning("%s falló (%s: %s) — probando el siguiente motor",
+                            nombre, type(e).__name__, e)
+
+        log.debug("Usando Pillow como último fallback")
+        return _imagen_a_pdf_pillow(ruta_rotada)
+    finally:
+        if temporal:
+            _borrar_si_existe(ruta_rotada)
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  Worker: convierte imagen → página PDF y reemplaza en hilo secundario
+#  Worker: arma el PDF final en hilo secundario
 # ─────────────────────────────────────────────────────────────────────────
 class _WorkerGuardar(QThread):
     progreso = pyqtSignal(int, str)   # (porcentaje 0-100, etiqueta)
     listo    = pyqtSignal(str)        # ruta del PDF final
     error    = pyqtSignal(str)        # mensaje de error completo
 
-    def __init__(self, ruta_pdf: Path, ruta_imagen: str,
-                 num_pagina: int, destino: Path):
+    def __init__(self, trabajo: TrabajoFirma, destino: Path):
         super().__init__()            # SIN parent= a propósito
-        self._ruta_pdf = ruta_pdf
-        self._ruta_imagen = ruta_imagen
-        self._num_pagina = num_pagina
+        self._trabajo = trabajo
         self._destino = destino
 
     def run(self):
-        log.debug("Worker iniciado — pdf=%s imagen=%s pagina=%s destino=%s",
-                  self._ruta_pdf, self._ruta_imagen,
-                  self._num_pagina, self._destino)
-        ruta_pag_pdf: str | None = None
+        paginas = list(self._trabajo.paginas)
+        log.debug("Worker iniciado — pdf=%s paginas=%s destino=%s",
+                  self._trabajo.ruta_pdf, paginas, self._destino)
+        temporales: list[str] = []
         try:
-            if not Path(self._ruta_imagen).exists():
+            if not self._trabajo.ruta_pdf.exists():
                 raise FileNotFoundError(
-                    f"La imagen de origen no existe: {self._ruta_imagen}")
-            if not self._ruta_pdf.exists():
-                raise FileNotFoundError(
-                    f"El PDF de trabajo no existe: {self._ruta_pdf}")
+                    f"El PDF de trabajo no existe: {self._trabajo.ruta_pdf}")
+            if not paginas:
+                raise ValueError("No hay páginas seleccionadas.")
 
-            # ── 1/4: imagen → PDF de una página ─────────────────────────
-            self.progreso.emit(10, "Convirtiendo imagen a PDF…")
-            ruta_pag_pdf = _convertir_imagen_a_pdf(self._ruta_imagen)
-            self.progreso.emit(30, "Imagen convertida — leyendo documento…")
+            faltantes = self._trabajo.paginas_pendientes()
+            if faltantes:
+                raise ValueError(
+                    "Faltan imágenes para las páginas "
+                    f"{formatear_paginas(faltantes)}.")
 
-            # ── 2/4: abrir el PDF original ──────────────────────────────
+            # ── 1: cada imagen → PDF de una página ──────────────────────
+            paginas_pdf: dict[int, str] = {}
+            total = len(paginas)
+            for i, pagina in enumerate(paginas):
+                ruta_img = self._trabajo.imagenes[pagina]
+                if not Path(ruta_img).exists():
+                    raise FileNotFoundError(
+                        f"No se encuentra la imagen de la página {pagina + 1}:\n"
+                        f"{ruta_img}")
+
+                pct = 5 + int(i / total * 55)
+                self.progreso.emit(
+                    pct, f"Convirtiendo la página {pagina + 1} "
+                         f"({i + 1} de {total})…")
+                ruta_pdf_pag = _convertir_imagen_a_pdf(
+                    ruta_img, self._trabajo.rotacion(pagina))
+                paginas_pdf[pagina] = ruta_pdf_pag
+                temporales.append(ruta_pdf_pag)
+
+            # ── 2: abrir el PDF original ────────────────────────────────
+            self.progreso.emit(62, "Leyendo el documento original…")
             try:
                 from pypdf import PdfReader, PdfWriter
             except ImportError:
                 from PyPDF2 import PdfReader, PdfWriter  # type: ignore
 
-            lector_orig = PdfReader(str(self._ruta_pdf))
-            lector_nueva = PdfReader(ruta_pag_pdf)
+            lector_orig = PdfReader(str(self._trabajo.ruta_pdf))
             total_pags = len(lector_orig.pages)
 
-            if self._num_pagina >= total_pags:
+            fuera = [p for p in paginas if p >= total_pags]
+            if fuera:
                 raise IndexError(
-                    f"Índice de página {self._num_pagina} fuera de rango "
-                    f"(el PDF tiene {total_pags} página/s).")
+                    f"El documento tiene {total_pags} página(s); se pidió "
+                    f"reemplazar {formatear_paginas(fuera)}.")
 
-            self.progreso.emit(45, "Leyendo documento original…")
+            # Los lectores de las páginas nuevas deben seguir vivos hasta
+            # escribir: pypdf resuelve los objetos de forma perezosa.
+            lectores_nuevos = {p: PdfReader(r) for p, r in paginas_pdf.items()}
 
-            # ── 3/4: reemplazar la página elegida ───────────────────────
-            self.progreso.emit(60, "Reemplazando página…")
+            # ── 3: reemplazar todas las páginas elegidas ────────────────
+            self.progreso.emit(72, f"Reemplazando {total} página(s)…")
             writer = PdfWriter()
+            reemplazadas = 0
             for i, pag in enumerate(lector_orig.pages):
-                if i == self._num_pagina:
-                    pag_nueva = lector_nueva.pages[0]
+                if i in lectores_nuevos:
+                    pag_nueva = lectores_nuevos[i].pages[0]
                     pag_nueva.mediabox = pag.mediabox
                     writer.add_page(pag_nueva)
+                    reemplazadas += 1
                 else:
                     writer.add_page(pag)
 
-            # ── 4/4: escribir el resultado ──────────────────────────────
-            self.progreso.emit(85, "Escribiendo archivo final…")
+            # ── 4: metadatos con las páginas firmadas ───────────────────
+            self.progreso.emit(85, "Escribiendo metadatos…")
+            try:
+                meta = dict(lector_orig.metadata or {})
+                meta.update({
+                    "/Producer": "PDF Sign Assistant",
+                    CLAVE_META_PAGINAS: ",".join(str(p) for p in paginas),
+                })
+                writer.add_metadata(meta)
+            except Exception as e:                   # noqa: BLE001
+                # Un Info dict raro no debe impedir guardar el documento
+                log.warning("No se pudieron escribir los metadatos: %s", e)
+
+            # ── 5: escribir el resultado ────────────────────────────────
+            self.progreso.emit(92, "Escribiendo el archivo final…")
             self._destino.parent.mkdir(parents=True, exist_ok=True)
             with open(self._destino, "wb") as f_out:
                 writer.write(f_out)
-            log.debug("Archivo escrito OK — %d bytes",
-                      self._destino.stat().st_size)
+            log.debug("Archivo escrito OK — %d páginas reemplazadas, %d bytes",
+                      reemplazadas, self._destino.stat().st_size)
 
-            _borrar_si_existe(ruta_pag_pdf)
             self.progreso.emit(100, "¡Listo!")
             self.listo.emit(str(self._destino))
 
         except Exception as e:                       # noqa: BLE001
             tb = traceback.format_exc()
             log.error("Error en worker:\n%s", tb)
-            _borrar_si_existe(ruta_pag_pdf)
             self.error.emit(f"{e}\n\n─── Traceback completo ───\n{tb}")
+        finally:
+            for t in temporales:
+                _borrar_si_existe(t)
+
+
+def leer_paginas_firmadas(ruta_pdf: Path) -> list[int]:
+    """Lee del PDF las páginas que firmó esta app.
+
+    Devuelve [] si el documento no tiene el metadato (por ejemplo, si lo
+    firmó una versión anterior).
+    """
+    try:
+        from pypdf import PdfReader
+        meta = PdfReader(str(ruta_pdf)).metadata or {}
+        crudo = meta.get(CLAVE_META_PAGINAS)
+        if not crudo:
+            return []
+        return sorted({
+            int(x) for x in str(crudo).split(",")
+            if x.strip().lstrip("-").isdigit()
+        })
+    except Exception:                                # noqa: BLE001
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -315,7 +411,7 @@ class FaseGuardar(QDialog):
     """
     Señales públicas:
       guardado_listo(object / Path)  → PDF guardado correctamente
-      cancelado()                    → el usuario canceló
+      cancelado()                    → el usuario volvió atrás
 
     Señal interna (NO conectar desde fuera):
       _despachar_guardado_listo(str) → encolada con QueuedConnection para
@@ -327,17 +423,14 @@ class FaseGuardar(QDialog):
     cancelado      = pyqtSignal()
     _despachar_guardado_listo = pyqtSignal(str)
 
-    def __init__(self, ruta_pdf: Path, ruta_imagen: str,
-                 num_pagina: int, carpeta_firmados: Path, parent=None):
+    def __init__(self, trabajo: TrabajoFirma, carpeta_firmados: Path, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Window |
                             Qt.WindowType.WindowCloseButtonHint)
         self.setObjectName("pantalla")
-        self.setMinimumSize(480, 440)
+        self.setMinimumSize(520, 460)
 
-        self._ruta_pdf = ruta_pdf
-        self._ruta_imagen = ruta_imagen
-        self._num_pagina = num_pagina
+        self.trabajo = trabajo
         self._carpeta_firmados = carpeta_firmados
         self._worker: _WorkerGuardar | None = None
         self._ruta_final_pendiente: str | None = None
@@ -355,19 +448,22 @@ class FaseGuardar(QDialog):
         raiz.setContentsMargins(0, 0, 0, 0)
         raiz.setSpacing(0)
 
-        nombre_pdf = os.path.basename(str(self._ruta_pdf))
+        nombre_pdf = os.path.basename(str(self.trabajo.ruta_pdf))
+        cantidad = self.trabajo.cantidad
+        plural = "s" if cantidad != 1 else ""
         cab = BarraSuperior(
-            f"Guardar  ·  Página {self._num_pagina + 1}  ·  {nombre_pdf}")
+            f"Guardar  ·  {cantidad} página{plural} "
+            f"({self.trabajo.etiqueta_paginas()})  ·  {nombre_pdf}")
         self.btn_volver = boton("←  Volver al escaneo", variant="ghost",
                                 tooltip="Volver al paso anterior (Esc)",
                                 on_click=self._on_cancelar)
         cab.agregar(self.btn_volver)
         raiz.addWidget(cab)
 
-        cuerpo = AreaScroll(margenes=(SPACE["xl"], SPACE["xl"], SPACE["xl"], SPACE["xl"]))
+        cuerpo = AreaScroll(margenes=(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"]),
+                            spacing=SPACE["md"])
         lay = cuerpo.lay
-
-        lay.addWidget(self._panel_imagen())
+        lay.addWidget(self._panel_paginas())
         lay.addWidget(self._panel_nombre())
         lay.addWidget(self._panel_progreso())
         lay.addStretch()
@@ -387,31 +483,49 @@ class FaseGuardar(QDialog):
         self.input_nombre.textChanged.connect(self._validar_nombre)
         self._validar_nombre()
 
-    def _panel_imagen(self) -> QFrame:
-        panel, lay_v = tarjeta(acento=True, padding=SPACE["md"])
-        fila = QHBoxLayout()
-        fila.setSpacing(SPACE["md"])
+    def _panel_paginas(self) -> QFrame:
+        """Resumen de qué imagen va en cada página."""
+        panel, lay = tarjeta(acento=True, padding=SPACE["md"], spacing=SPACE["sm"])
+        cantidad = self.trabajo.cantidad
+        plural = "s" if cantidad != 1 else ""
+        lay.addWidget(etiqueta(
+            f"{cantidad} PÁGINA{plural.upper()} A REEMPLAZAR", rol="seccion"))
 
-        self.lbl_img = QLabel()
-        self.lbl_img.setObjectName("lienzoPagina")
-        self.lbl_img.setFixedSize(84, 110)
-        self.lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._cargar_preview()
-        fila.addWidget(self.lbl_img)
+        for pagina in self.trabajo.paginas:
+            ruta = self.trabajo.imagenes.get(pagina, "")
+            rotacion = self.trabajo.rotacion(pagina)
 
-        info = QVBoxLayout()
-        info.setSpacing(2)
-        info.addWidget(etiqueta("IMAGEN A INSERTAR", rol="seccion"))
-        info.addWidget(etiqueta(os.path.basename(self._ruta_imagen),
-                                rol="subtitulo"))
-        info.addWidget(etiqueta(self._ruta_imagen, rol="hint", wrap=True))
-        info.addWidget(etiqueta(
-            f"Reemplazará la página {self._num_pagina + 1} del documento.",
-            rol="ok"))
-        info.addStretch()
-        fila.addLayout(info, 1)
+            fila = QHBoxLayout()
+            fila.setSpacing(SPACE["md"])
 
-        lay_v.addLayout(fila)
+            thumb = QLabel()
+            thumb.setObjectName("lienzoPagina")
+            thumb.setFixedSize(52, 68)
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pm = QPixmap(ruta)
+            if not pm.isNull():
+                if rotacion:
+                    pm = pm.transformed(QTransform().rotate(rotacion),
+                                        Qt.TransformationMode.SmoothTransformation)
+                thumb.setPixmap(pm.scaled(
+                    52, 68, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation))
+            fila.addWidget(thumb)
+
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            col.addWidget(etiqueta(f"Página {pagina + 1}", rol="subtitulo"))
+            detalle = os.path.basename(ruta)
+            if rotacion:
+                detalle += f"  ·  rotada {rotacion}°"
+            col.addWidget(etiqueta(detalle, rol="hint", wrap=True))
+            col.addStretch()
+            fila.addLayout(col, 1)
+
+            contenedor = QFrame()
+            contenedor.setLayout(fila)
+            lay.addWidget(contenedor)
+
         return panel
 
     def _panel_nombre(self) -> QFrame:
@@ -429,7 +543,7 @@ class FaseGuardar(QDialog):
         self.input_nombre.setClearButtonEnabled(True)
         self.input_nombre.returnPressed.connect(self._on_guardar)
 
-        stem = Path(str(self._ruta_pdf)).stem
+        stem = Path(str(self.trabajo.ruta_pdf)).stem
         if stem.startswith("reedit_"):
             stem = stem[len("reedit_"):]
         self.input_nombre.setText(stem)
@@ -461,19 +575,8 @@ class FaseGuardar(QDialog):
         self.panel_progreso.hide()
         return self.panel_progreso
 
-    def _cargar_preview(self):
-        pm = QPixmap(self._ruta_imagen)
-        if pm.isNull():
-            log.warning("Preview: no se pudo cargar %s", self._ruta_imagen)
-            return
-        self.lbl_img.setPixmap(pm.scaled(
-            self.lbl_img.width(), self.lbl_img.height(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        ))
-
     def _on_tema_cambiado(self, _modo: str):
-        self._cargar_preview()
+        pass   # los estilos vienen del QSS; nada local que repintar
 
     # ── Validación ────────────────────────────────────────────────────
     def _validar_nombre(self, texto: str = "") -> str | None:
@@ -507,36 +610,44 @@ class FaseGuardar(QDialog):
             self.input_nombre.setFocus()
             return
 
+        if not self.trabajo.completo:
+            QMessageBox.warning(
+                self, "Faltan imágenes",
+                "Todavía hay páginas sin imagen asignada:\n"
+                f"{formatear_paginas(self.trabajo.paginas_pendientes())}")
+            return
+
         destino = self._carpeta_firmados / nombre
         if destino.exists():
             resp = QMessageBox.question(
                 self, "Archivo existente",
                 f"Ya existe un archivo con ese nombre:\n{nombre}\n\n"
                 "¿Querés reemplazarlo?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if resp != QMessageBox.StandardButton.Yes:
                 return
 
-        if not Path(self._ruta_imagen).exists():
+        faltan_img = [p for p in self.trabajo.paginas
+                      if not Path(self.trabajo.imagenes[p]).exists()]
+        if faltan_img:
             QMessageBox.critical(
-                self, "Archivo no encontrado",
-                f"No se encontró la imagen de entrada:\n{self._ruta_imagen}\n\n"
-                "Volvé al paso de escaneo y seleccioná la imagen nuevamente.")
+                self, "Archivos no encontrados",
+                "No se encuentran las imágenes de las páginas "
+                f"{formatear_paginas(faltan_img)}.\n\n"
+                "Volvé al paso de escaneo y asignalas de nuevo.")
             return
 
-        if not self._ruta_pdf.exists():
+        if not self.trabajo.ruta_pdf.exists():
             QMessageBox.critical(
                 self, "Archivo no encontrado",
-                f"No se encontró el PDF de trabajo:\n{self._ruta_pdf}\n\n"
+                f"No se encontró el PDF de trabajo:\n{self.trabajo.ruta_pdf}\n\n"
                 "Cancelá y abrí el PDF nuevamente.")
             return
 
         self._ruta_final_pendiente = None
         self._set_guardando(True)
 
-        self._worker = _WorkerGuardar(self._ruta_pdf, self._ruta_imagen,
-                                      self._num_pagina, destino)
+        self._worker = _WorkerGuardar(self.trabajo, destino)
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
@@ -609,8 +720,7 @@ class FaseGuardar(QDialog):
         QMessageBox.critical(
             self, "Error al guardar",
             f"No se pudo guardar el documento:\n\n{resumen}\n\n"
-            "Revisá la consola para el traceback completo.\n"
-            "Verificá que pypdf (o PyPDF2) y Pillow estén instalados.")
+            "Revisá el log para el traceback completo.")
 
     @pyqtSlot()
     def _on_cancelar(self):

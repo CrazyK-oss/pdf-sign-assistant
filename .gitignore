@@ -11,6 +11,7 @@ venv/
 # Carpetas de trabajo de la app
 /pdfs_trabajo/
 /pdfs_firmados/
+/logs/
 /documents/
 /scans/
 /temp/

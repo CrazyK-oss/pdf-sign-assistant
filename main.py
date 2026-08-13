@@ -27,6 +27,7 @@ NOTA PyInstaller:
 
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 from datetime import datetime
@@ -75,10 +76,13 @@ from modules.setup import (
     CARPETA_TRABAJO,
     CONFIG_PATH,
     cargar_config,
+    configurar_logging,
     guardar_config,
+    limpiar_trabajos_huerfanos,
     setup_directories,
 )
 from modules.theme import SPACE, THEME, apply_theme, current_mode
+from modules.trabajo import TrabajoFirma
 from modules.ui import (
     FilaAdaptable,
     abrir_en_sistema,
@@ -89,6 +93,7 @@ from modules.ui import (
 )
 
 setup_directories()
+log = logging.getLogger("psa.main")
 
 # Limpiar la carpeta temporal de envíos de sesiones anteriores
 try:
@@ -100,7 +105,8 @@ except Exception:
 
 # ── Panel del PDF activo ──────────────────────────────────────────────────────
 
-def _panel_activo(ruta: Path, on_trabajar, on_cancelar) -> QWidget:
+def _panel_activo(ruta: Path, total_paginas: int,
+                  on_trabajar, on_cancelar) -> QWidget:
     """Tarjeta con el PDF en curso y sus dos acciones."""
     panel, lay = tarjeta(acento=True, padding=SPACE["lg"], spacing=SPACE["md"])
     panel.setObjectName("panelActivo")
@@ -118,12 +124,16 @@ def _panel_activo(ruta: Path, on_trabajar, on_cancelar) -> QWidget:
     col.setSpacing(2)
     col.addWidget(etiqueta("PDF EN TRABAJO", rol="seccion"))
     col.addWidget(etiqueta(ruta.name, rol="subtitulo", wrap=True))
-    col.addWidget(etiqueta(str(ruta.parent), rol="hint", wrap=True))
+    detalle = str(ruta.parent)
+    if total_paginas:
+        plural = "s" if total_paginas != 1 else ""
+        detalle = f"{total_paginas} página{plural}  ·  {detalle}"
+    col.addWidget(etiqueta(detalle, rol="hint", wrap=True))
     fila_info.addLayout(col, 1)
     lay.addLayout(fila_info)
 
     acciones = FilaAdaptable(breakpoint_px=440, spacing=SPACE["sm"])
-    acciones.agregar(boton("Trabajar páginas  →", min_w=190, height=40,
+    acciones.agregar(boton("Elegir páginas  →", min_w=190, height=40,
                            on_click=on_trabajar))
     acciones.agregar_stretch()
     acciones.agregar(boton("✕  Cancelar", variant="danger", height=40,
@@ -216,8 +226,8 @@ class VentanaPrincipal(QMainWindow):
         self.resize(880, 660)
 
         self.config = cargar_config()
-        self._pdf_activo: Path | None = None
-        self._pagina_activa: int = 0
+        # Todo el estado del trabajo en curso vive en TrabajoFirma
+        self._trabajo: TrabajoFirma | None = None
         self._vista_preview = None
         self._vista_escaneo = None
         self._vista_guardar = None
@@ -490,10 +500,10 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Abrir PDF ─────────────────────────────────────────────────────────
     def abrir_pdf(self):
-        if self._pdf_activo is not None:
+        if self._trabajo is not None:
             QMessageBox.information(
                 self, "PDF en proceso",
-                f"Ya hay un PDF en trabajo:\n{self._pdf_activo.name}\n\n"
+                f"Ya hay un PDF en trabajo:\n{self._trabajo.ruta_pdf.name}\n\n"
                 "Cancelá o finalizá el trabajo actual antes de abrir otro.")
             return
 
@@ -503,7 +513,8 @@ class VentanaPrincipal(QMainWindow):
             return
 
         origen = Path(ruta_str)
-        if not self._validar_pdf(origen):
+        total_paginas = self._validar_pdf(origen)
+        if total_paginas is None:
             return
 
         destino = CARPETA_TRABAJO / origen.name
@@ -517,16 +528,21 @@ class VentanaPrincipal(QMainWindow):
             QMessageBox.critical(self, "Error al copiar", str(e))
             return
 
-        self._activar_pdf(destino)
-        self.status.showMessage(f"PDF cargado: {destino.name}")
+        self._activar_pdf(destino, total_paginas)
+        plural = "s" if total_paginas != 1 else ""
+        self.status.showMessage(
+            f"PDF cargado: {destino.name} ({total_paginas} página{plural})")
 
-    def _validar_pdf(self, ruta: Path) -> bool:
-        """Avisa antes de copiar si el PDF está dañado o protegido, en vez
-        de fallar más adelante en el flujo."""
+    def _validar_pdf(self, ruta: Path) -> int | None:
+        """Valida el PDF antes de copiarlo y devuelve su cantidad de páginas.
+
+        Devuelve None si está dañado, protegido o vacío: así se avisa acá
+        en vez de fallar más adelante, en mitad del flujo.
+        """
         try:
             import fitz
         except ImportError:
-            return True
+            return 0        # sin fitz no podemos contar; el flujo sigue
         try:
             with fitz.open(str(ruta)) as doc:
                 if doc.needs_pass:
@@ -534,23 +550,25 @@ class VentanaPrincipal(QMainWindow):
                         self, "PDF protegido",
                         "El documento está protegido con contraseña.\n\n"
                         "Quitale la protección y volvé a intentarlo.")
-                    return False
+                    return None
                 if doc.page_count == 0:
                     QMessageBox.warning(self, "PDF vacío",
                                         "El documento no tiene páginas.")
-                    return False
+                    return None
+                return doc.page_count
         except Exception as e:                       # noqa: BLE001
             QMessageBox.critical(
                 self, "No se pudo abrir el PDF",
                 f"El archivo parece dañado o no es un PDF válido:\n\n{e}")
-            return False
-        return True
+            return None
 
-    def _activar_pdf(self, ruta: Path):
-        self._pdf_activo = ruta
+    def _activar_pdf(self, ruta: Path, total_paginas: int = 0):
+        self._trabajo = TrabajoFirma(ruta_pdf=ruta, total_paginas=total_paginas)
+        log.info("Trabajo iniciado sobre %s (%d páginas)", ruta.name, total_paginas)
         self._limpiar_panel_activo()
         self._lay_panel.addWidget(
-            _panel_activo(ruta, on_trabajar=self._iniciar_flujo_trabajo,
+            _panel_activo(ruta, total_paginas,
+                          on_trabajar=self._iniciar_flujo_trabajo,
                           on_cancelar=self._cancelar_trabajo))
         self.panel_activo_container.setVisible(True)
         self.btn_abrir.setEnabled(False)
@@ -564,17 +582,21 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Cancelar trabajo ──────────────────────────────────────────────────
     def _cancelar_trabajo(self):
-        if self._pdf_activo is None:
+        if self._trabajo is None:
             return
+
+        avance = ""
+        if self._trabajo.paginas:
+            avance = f"\n\nProgreso: {self._trabajo.descripcion_progreso()}."
         resp = QMessageBox.question(
             self, "Cancelar trabajo",
-            f"¿Seguro que querés salir de:\n{self._pdf_activo.name}?\n\n"
-            "Los cambios no guardados se perderán.",
+            f"¿Seguro que querés salir de:\n{self._trabajo.ruta_pdf.name}?"
+            f"{avance}\n\nLos cambios no guardados se perderán.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if resp != QMessageBox.StandardButton.Yes:
             return
         try:
-            self._pdf_activo.unlink(missing_ok=True)
+            self._trabajo.ruta_pdf.unlink(missing_ok=True)
         except OSError:
             pass
         self._cerrar_vistas_abiertas()
@@ -582,8 +604,7 @@ class VentanaPrincipal(QMainWindow):
         self.status.showMessage("Trabajo cancelado.")
 
     def _desactivar_panel(self):
-        self._pdf_activo = None
-        self._pagina_activa = 0
+        self._trabajo = None
         self._limpiar_panel_activo()
         self.panel_activo_container.setVisible(False)
         self.btn_abrir.setEnabled(True)
@@ -600,73 +621,105 @@ class VentanaPrincipal(QMainWindow):
             setattr(self, attr, None)
 
     # ── Flujo de trabajo ──────────────────────────────────────────────────
+    #  Las cuatro fases comparten un mismo TrabajoFirma: la selección de
+    #  páginas, las imágenes y las rotaciones viven ahí y no en atributos
+    #  sueltos de la ventana. Volver atrás conserva lo ya hecho.
+
     def _iniciar_flujo_trabajo(self):
-        if self._pdf_activo is None:
+        if self._trabajo is None:
             return
         self._cerrar_vista("_vista_preview")
-        self._vista_preview = VistaPrevisualizacion(str(self._pdf_activo), parent=self)
-        self._vista_preview.setWindowTitle("PDF Sign Assistant — Seleccionar página")
-        self._vista_preview.resize(960, 680)
-        self._vista_preview.pagina_seleccionada.connect(self._on_pagina_elegida)
+        self._vista_preview = VistaPrevisualizacion(
+            str(self._trabajo.ruta_pdf),
+            seleccion_inicial=self._trabajo.paginas,
+            parent=self)
+        self._vista_preview.setWindowTitle("PDF Sign Assistant — Elegir páginas")
+        self._vista_preview.resize(980, 700)
+        self._vista_preview.paginas_seleccionadas.connect(self._on_paginas_elegidas)
         self._vista_preview.cancelar.connect(self._on_preview_cancelado)
         self._vista_preview.show()
 
-    def _on_pagina_elegida(self, num_pagina: int):
-        self._pagina_activa = num_pagina
+    def _on_paginas_elegidas(self, paginas: list):
+        if self._trabajo is None:
+            return
+        self._trabajo.set_paginas(paginas)
         self._cerrar_vista("_vista_preview")
 
+        etiqueta_pags = self._trabajo.etiqueta_paginas()
+        log.info("Imprimiendo páginas %s de %s",
+                 etiqueta_pags, self._trabajo.ruta_pdf.name)
+
         from modules.fase2_print import ImpresionPagina
-        if not ImpresionPagina.imprimir(str(self._pdf_activo), num_pagina, parent=self):
+        if not ImpresionPagina.imprimir(str(self._trabajo.ruta_pdf),
+                                        self._trabajo.paginas, parent=self):
             self.status.showMessage("Impresión cancelada.")
             self._iniciar_flujo_trabajo()
             return
 
-        self.status.showMessage(f"Página {num_pagina + 1} enviada a la impresora…")
-        self._abrir_escaneo(num_pagina)
+        cantidad = self._trabajo.cantidad
+        plural = "s" if cantidad != 1 else ""
+        self.status.showMessage(
+            f"{cantidad} página{plural} ({etiqueta_pags}) enviada{plural} a la impresora…")
+        self._abrir_escaneo()
 
-    def _abrir_escaneo(self, num_pagina: int):
+    def _abrir_escaneo(self):
+        if self._trabajo is None:
+            return
         self._cerrar_vista("_vista_escaneo")
         from modules.fase3_scan import VistaEscaneo
-        self._vista_escaneo = VistaEscaneo(str(self._pdf_activo), num_pagina, parent=self)
-        self._vista_escaneo.setWindowTitle("PDF Sign Assistant — Escanear página")
-        self._vista_escaneo.resize(860, 620)
-        self._vista_escaneo.imagen_lista.connect(self._on_imagen_escaneada)
+        self._vista_escaneo = VistaEscaneo(self._trabajo, parent=self)
+        self._vista_escaneo.setWindowTitle("PDF Sign Assistant — Escanear páginas")
+        self._vista_escaneo.resize(900, 660)
+        self._vista_escaneo.completado.connect(self._on_escaneo_completado)
         self._vista_escaneo.cancelar.connect(self._on_escaneo_cancelado)
         self._vista_escaneo.show()
 
-    def _on_imagen_escaneada(self, ruta_imagen: str):
+    def _on_escaneo_completado(self):
         self._cerrar_vista("_vista_escaneo")
-        self._abrir_guardar(ruta_imagen)
+        self._abrir_guardar()
 
-    def _abrir_guardar(self, ruta_imagen: str):
+    def _abrir_guardar(self):
+        if self._trabajo is None:
+            return
         self._cerrar_vista("_vista_guardar")
         from modules.fase_guardar import FaseGuardar
         self._vista_guardar = FaseGuardar(
-            ruta_pdf=self._pdf_activo, ruta_imagen=ruta_imagen,
-            num_pagina=self._pagina_activa, carpeta_firmados=CARPETA_FIRMADO,
-            parent=self)
+            trabajo=self._trabajo, carpeta_firmados=CARPETA_FIRMADO, parent=self)
         self._vista_guardar.setWindowTitle("PDF Sign Assistant — Guardar documento")
-        self._vista_guardar.resize(800, 600)
+        self._vista_guardar.resize(820, 640)
         self._vista_guardar.guardado_listo.connect(self._on_guardado_listo)
         self._vista_guardar.cancelado.connect(self._on_guardar_cancelado)
         self._vista_guardar.show()
 
     def _on_guardado_listo(self, ruta_final):
         self._cerrar_vista("_vista_guardar")
-        try:
-            if self._pdf_activo:
-                self._pdf_activo.unlink(missing_ok=True)
-        except OSError:
-            pass
+        trabajo = self._trabajo
+        if trabajo is not None:
+            log.info("Guardado %s con las páginas %s",
+                     Path(ruta_final).name, trabajo.etiqueta_paginas())
+            try:
+                trabajo.ruta_pdf.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        cantidad = trabajo.cantidad if trabajo else 0
+        etiqueta_pags = trabajo.etiqueta_paginas() if trabajo else ""
         ruta_final = Path(ruta_final)
+
         self._desactivar_panel()
         self._agregar_item_guardado(ruta_final)
-        self.status.showMessage(f"✅  Guardado: {ruta_final.name}")
-        QMessageBox.information(self, "¡Listo!", f"Documento guardado:\n{ruta_final}")
+
+        plural = "s" if cantidad != 1 else ""
+        self.status.showMessage(
+            f"✅  Guardado: {ruta_final.name} ({cantidad} página{plural})")
+        QMessageBox.information(
+            self, "¡Listo!",
+            f"Documento guardado:\n{ruta_final}\n\n"
+            f"Página{plural} firmada{plural}: {etiqueta_pags}")
 
     def _on_guardar_cancelado(self):
         self._cerrar_vista("_vista_guardar")
-        self._abrir_escaneo(self._pagina_activa)
+        self._abrir_escaneo()
 
     def _on_escaneo_cancelado(self):
         self._cerrar_vista("_vista_escaneo")
@@ -683,7 +736,7 @@ class VentanaPrincipal(QMainWindow):
             self._reabrir_guardado(item)
 
     def _reabrir_guardado(self, item: ItemGuardado):
-        if self._pdf_activo is not None:
+        if self._trabajo is not None:
             QMessageBox.information(self, "PDF en proceso",
                                     "Cancelá el trabajo actual antes de abrir otro.")
             return
@@ -694,14 +747,30 @@ class VentanaPrincipal(QMainWindow):
             self._recargar_guardados()
             return
 
+        total_paginas = self._validar_pdf(ruta)
+        if total_paginas is None:
+            return
+
         copia = CARPETA_TRABAJO / f"reedit_{ruta.name}"
         try:
             shutil.copy2(ruta, copia)
         except OSError as e:
             QMessageBox.critical(self, "Error al copiar", str(e))
             return
-        self._activar_pdf(copia)
-        self.status.showMessage(f"Re-editando: {ruta.name}")
+
+        self._activar_pdf(copia, total_paginas)
+
+        # Si el documento ya fue firmado por la app, proponemos de entrada
+        # las mismas páginas: re-editar casi siempre es corregir esas hojas.
+        from modules.fase_guardar import leer_paginas_firmadas
+        previas = leer_paginas_firmadas(ruta)
+        if previas and self._trabajo is not None:
+            self._trabajo.set_paginas(previas)
+            self.status.showMessage(
+                f"Re-editando: {ruta.name}  ·  ya venía firmado en "
+                f"{self._trabajo.etiqueta_paginas()}")
+        else:
+            self.status.showMessage(f"Re-editando: {ruta.name}")
 
     # ── Enviar correo ─────────────────────────────────────────────────────
     def _enviar_correo(self):
@@ -719,11 +788,17 @@ class VentanaPrincipal(QMainWindow):
             QMessageBox.critical(self, "Error de módulo", str(e))
             return
 
+        # Las páginas firmadas quedan registradas en los metadatos del PDF
+        # al guardarlo. Antes se mandaba [0] fijo y el resumen decía
+        # "página 1" sin importar cuáles se hubieran firmado.
+        from modules.fase_guardar import leer_paginas_firmadas
+        paginas = leer_paginas_firmadas(item.ruta)
+
         enviar_documento(
             pdf_firmado=item.ruta,
             carpeta_firmados=CARPETA_FIRMADO,
             config=self.config,
-            paginas=[0],
+            paginas=paginas,
             nombre_doc=item.ruta.stem,
             parent=self,
         )
@@ -745,6 +820,16 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("PDF Sign Assistant")
+
+    # El .exe se compila con console=False: sin log a archivo, cualquier
+    # error en la máquina del usuario se perdía sin dejar rastro.
+    archivo_log = configurar_logging()
+    log.info("── PDF Sign Assistant iniciado ──")
+    log.info("Log en %s", archivo_log)
+
+    huerfanos = limpiar_trabajos_huerfanos()
+    if huerfanos:
+        log.info("Limpiadas %d copias de trabajo viejas", huerfanos)
 
     config = cargar_config()
     apply_theme(app, config.get("tema", "light"))

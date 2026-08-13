@@ -1,9 +1,9 @@
 """
 modules/fase2_print.py
 ============================================================
-Fase 2: imprimir la página elegida.
+Fase 2: imprimir las páginas elegidas.
 
-Estrategia (sin cambios respecto al diseño original): se renderiza la
+Estrategia (sin cambios respecto al diseño original): se renderiza cada
 página con fitz a alta resolución y se envía a la impresora con
 StretchDIBits() directamente sobre el printer DC. Eso evita:
   - El pipeline GDI/ICM que convierte colores (origen del tinte morado)
@@ -11,17 +11,24 @@ StretchDIBits() directamente sobre el printer DC. Eso evita:
   - CreateBitmap/SelectObject que fallaba con "Select bitmap object failed"
   - ImageWin.Dib, que pasaba por GDI y volvía a tocar el color
 
-Optimizaciones de esta versión
-------------------------------
+Multipágina
+-----------
+Todas las páginas seleccionadas viajan en UN SOLO trabajo de impresión
+(un StartDoc con varios StartPage/EndPage). Así la impresora no intercala
+otros trabajos en el medio y la cola muestra un único ítem, que es lo que
+espera quien está parado al lado de la impresora esperando sus hojas.
+Se renderiza de a una página por vez: un documento de 20 páginas no
+levanta 500 MB de bitmaps en memoria.
+
+Optimizaciones
+--------------
 * CONVERSIÓN RGB→BGR ~8x MÁS RÁPIDA. El swap se hacía con un bucle
-  Python byte a byte sobre ~26 MB (≈1,2 s en una máquina de escritorio,
-  varios segundos en una PC de oficina, con la UI congelada). Ahora se
-  hace con asignación por slices, que corre en C:
+  Python byte a byte sobre ~26 MB (≈1,2 s por página, con la UI
+  congelada). Ahora usa asignación por slices, que corre en C:
       buf[0::3], buf[2::3] = buf[2::3], buf[0::3]
-* EL RENDER Y LA IMPRESIÓN NO BLOQUEAN LA UI. Corren en un QThread con
-  un diálogo de progreso modal; la ventana sigue repintándose.
-* El printer DC se abre UNA sola vez (antes se abría, se cerraba para
-  leer los caps y se volvía a abrir).
+* EL RENDER Y LA IMPRESIÓN NO BLOQUEAN LA UI: corren en un QThread con
+  diálogo de progreso, que además informa página por página.
+* El printer DC se abre UNA sola vez.
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ import sys
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
 from PyQt6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+
+from modules.trabajo import formatear_paginas
 
 try:
     import fitz
@@ -58,7 +67,7 @@ _HALFTONE       = 4   # SetStretchBltMode: máxima calidad de escalado
 
 
 def _rgb_a_bgr(datos: bytes | bytearray) -> bytearray:
-    """Convierte un buffer RGB888 a BGR888 in-place-ish.
+    """Convierte un buffer RGB888 a BGR888.
 
     fitz entrega (R,G,B) por píxel; GDI espera (B,G,R). La asignación
     por slices con paso 3 se ejecuta enteramente en C: sobre una página
@@ -96,18 +105,24 @@ class _WorkerImpresion(QThread):
     progreso = pyqtSignal(int, str)
     error    = pyqtSignal(str)
 
-    def __init__(self, ruta_pdf: str, num_pagina: int, printer_name: str):
+    def __init__(self, ruta_pdf: str, paginas: list[int], printer_name: str):
         super().__init__()
         self._ruta_pdf = ruta_pdf
-        self._num_pagina = num_pagina
+        self._paginas = list(paginas)
         self._printer_name = printer_name
         self.ok = False
+        self.impresas = 0
 
     def run(self):
         hdc = None
+        doc_abierto = False
         try:
+            total = len(self._paginas)
+            if not total:
+                raise ValueError("No hay páginas para imprimir.")
+
             # 1. Abrir el printer DC (una sola vez) y leer sus capacidades
-            self.progreso.emit(10, "Conectando con la impresora…")
+            self.progreso.emit(2, "Conectando con la impresora…")
             hdc = win32ui.CreateDC()
             hdc.CreatePrinterDC(self._printer_name)
             dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
@@ -116,26 +131,49 @@ class _WorkerImpresion(QThread):
             page_px_h = hdc.GetDeviceCaps(win32con.VERTRES)
             render_dpi = min(max(dpi_x, dpi_y), MAX_RENDER_DPI)
 
-            # 2. Renderizar la página
-            self.progreso.emit(30, f"Renderizando la página a {render_dpi} DPI…")
+            gdi32 = ctypes.windll.gdi32          # type: ignore[attr-defined]
+            handle = hdc.GetHandleOutput()
+            gdi32.SetStretchBltMode(handle, _HALFTONE)
+
+            # 2. Un único trabajo de impresión para todas las páginas
+            hdc.StartDoc("PDF Sign Assistant")
+            doc_abierto = True
+
             with fitz.open(self._ruta_pdf) as doc:
-                pagina = doc[self._num_pagina]
-                zoom = render_dpi / 72.0
-                pix = pagina.get_pixmap(
-                    matrix=fitz.Matrix(zoom, zoom),
-                    colorspace=fitz.csRGB,
-                    alpha=False,
-                )
-                src_w, src_h = pix.width, pix.height
-                muestras = pix.samples
+                for i, num_pagina in enumerate(self._paginas):
+                    base = int(i / total * 96)
+                    self.progreso.emit(
+                        base + 2,
+                        f"Renderizando página {num_pagina + 1} "
+                        f"({i + 1} de {total}) a {render_dpi} DPI…")
 
-            # 3. RGB → BGR + alineación de filas
-            self.progreso.emit(60, "Preparando los datos de color…")
-            datos, _stride = _aplicar_stride(_rgb_a_bgr(muestras), src_w, src_h)
+                    pagina = doc[num_pagina]
+                    zoom = render_dpi / 72.0
+                    pix = pagina.get_pixmap(
+                        matrix=fitz.Matrix(zoom, zoom),
+                        colorspace=fitz.csRGB,
+                        alpha=False,
+                    )
+                    src_w, src_h = pix.width, pix.height
+                    muestras = pix.samples
+                    del pix          # libera el bitmap de fitz cuanto antes
 
-            # 4. Enviar a la impresora
-            self.progreso.emit(80, "Enviando a la impresora…")
-            self._stretch_dibits(hdc, datos, src_w, src_h, page_px_w, page_px_h)
+                    self.progreso.emit(
+                        base + 5, f"Preparando página {num_pagina + 1}…")
+                    datos, _stride = _aplicar_stride(
+                        _rgb_a_bgr(muestras), src_w, src_h)
+                    del muestras
+
+                    self.progreso.emit(
+                        base + 8,
+                        f"Enviando página {num_pagina + 1} a la impresora…")
+                    self._imprimir_pagina(hdc, gdi32, handle, datos,
+                                          src_w, src_h, page_px_w, page_px_h)
+                    del datos
+                    self.impresas += 1
+
+            hdc.EndDoc()
+            doc_abierto = False
 
             self.progreso.emit(100, "Listo")
             self.ok = True
@@ -143,15 +181,23 @@ class _WorkerImpresion(QThread):
             self.error.emit(str(e))
         finally:
             if hdc is not None:
+                if doc_abierto:
+                    # Un trabajo a medio abrir dejaría la cola trabada
+                    try:
+                        hdc.AbortDoc()
+                    except Exception:
+                        pass
                 try:
                     hdc.DeleteDC()
                 except Exception:
                     pass
 
     @staticmethod
-    def _stretch_dibits(hdc, datos: bytes, src_w: int, src_h: int,
-                        page_px_w: int, page_px_h: int) -> None:
-        """Escribe el bitmap BGR en el DC de la impresora, centrado y a escala."""
+    def _imprimir_pagina(hdc, gdi32, handle, datos: bytes,
+                         src_w: int, src_h: int,
+                         page_px_w: int, page_px_h: int) -> None:
+        """Escribe un bitmap BGR en el DC, centrado y a escala, como una
+        página nueva del trabajo de impresión en curso."""
         bmi = struct.pack(
             "<IiiHHIIiiII",
             40,        # biSize
@@ -171,11 +217,6 @@ class _WorkerImpresion(QThread):
         x_off = (page_px_w - dest_w) // 2
         y_off = (page_px_h - dest_h) // 2
 
-        gdi32 = ctypes.windll.gdi32          # type: ignore[attr-defined]
-        handle = hdc.GetHandleOutput()
-        gdi32.SetStretchBltMode(handle, _HALFTONE)
-
-        hdc.StartDoc("PDF Sign Assistant")
         hdc.StartPage()
         try:
             resultado = gdi32.StretchDIBits(
@@ -187,11 +228,9 @@ class _WorkerImpresion(QThread):
             )
             if resultado == 0:
                 raise RuntimeError(
-                    "StretchDIBits devolvió 0 — revisá el driver de la impresora."
-                )
+                    "StretchDIBits devolvió 0 — revisá el driver de la impresora.")
         finally:
             hdc.EndPage()
-            hdc.EndDoc()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -200,16 +239,25 @@ class _WorkerImpresion(QThread):
 class ImpresionPagina:
 
     @staticmethod
-    def imprimir(ruta_pdf: str, num_pagina: int, parent=None) -> bool:
-        """Muestra el diálogo de impresión e imprime la página indicada.
+    def imprimir(ruta_pdf: str, paginas, parent=None) -> bool:
+        """Muestra el diálogo de impresión e imprime las páginas indicadas.
 
-        Devuelve True si el trabajo se envió a la impresora.
+        `paginas` es una lista de índices 0-based (también acepta un int
+        suelto, por compatibilidad). Devuelve True si el trabajo se envió.
         """
+        if isinstance(paginas, int):
+            paginas = [paginas]
+        paginas = sorted({int(p) for p in paginas})
+
+        if not paginas:
+            QMessageBox.warning(parent, "Sin páginas",
+                                "No hay páginas seleccionadas para imprimir.")
+            return False
+
         if not PYMUPDF_OK:
             QMessageBox.critical(
                 parent, "Dependencia faltante",
-                "PyMuPDF no está instalado.\n\npip install pymupdf",
-            )
+                "PyMuPDF no está instalado.\n\npip install pymupdf")
             return False
 
         if sys.platform != "win32" or not WIN32_OK:
@@ -217,30 +265,41 @@ class ImpresionPagina:
                 parent, "Impresión no disponible",
                 "La impresión directa usa GDI de Windows (pywin32).\n\n"
                 "En Windows, instalá las dependencias con:\n"
-                "    pip install pywin32",
-            )
+                "    pip install pywin32")
             return False
 
-        # 1. Elegir impresora (Qt sólo para la UI, no para imprimir)
+        etiqueta = formatear_paginas(paginas)
+
+        # 1. Elegir impresora (Qt sólo para la UI, no para imprimir).
+        #    La orientación se toma de la primera página elegida.
         printer_qt = QPrinter(QPrinter.PrinterMode.ScreenResolution)
         printer_qt.setColorMode(QPrinter.ColorMode.Color)
         try:
             with fitz.open(ruta_pdf) as doc_tmp:
-                rect = doc_tmp[num_pagina].rect
+                total_doc = doc_tmp.page_count
+                fuera = [p for p in paginas if not 0 <= p < total_doc]
+                if fuera:
+                    QMessageBox.critical(
+                        parent, "Páginas inexistentes",
+                        f"El documento tiene {total_doc} página(s) y se pidieron: "
+                        f"{formatear_paginas(fuera)}.")
+                    return False
+                rect = doc_tmp[paginas[0]].rect
                 printer_qt.setPageOrientation(
                     QPrinter.Orientation.Landscape if rect.width > rect.height
-                    else QPrinter.Orientation.Portrait
-                )
+                    else QPrinter.Orientation.Portrait)
         except Exception:
             pass
 
         dialog = QPrintDialog(printer_qt, parent)
-        dialog.setWindowTitle(f"Imprimir — Página {num_pagina + 1}")
+        dialog.setWindowTitle(
+            f"Imprimir — {len(paginas)} página(s): {etiqueta}")
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return False
 
         # 2. Render + impresión en segundo plano, con progreso visible
-        progreso = QProgressDialog("Preparando la página…", "", 0, 100, parent)
+        progreso = QProgressDialog(
+            f"Preparando {len(paginas)} página(s)…", "", 0, 100, parent)
         progreso.setWindowTitle("Imprimiendo")
         progreso.setCancelButton(None)          # el trabajo GDI no es cancelable
         progreso.setWindowModality(Qt.WindowModality.WindowModal)
@@ -248,25 +307,26 @@ class ImpresionPagina:
         progreso.setAutoClose(False)
         progreso.setValue(0)
 
-        worker = _WorkerImpresion(ruta_pdf, num_pagina, printer_qt.printerName())
+        worker = _WorkerImpresion(ruta_pdf, paginas, printer_qt.printerName())
         errores: list[str] = []
         worker.progreso.connect(
-            lambda pct, txt: (progreso.setValue(pct), progreso.setLabelText(txt))
-        )
+            lambda pct, txt: (progreso.setValue(min(100, pct)),
+                              progreso.setLabelText(txt)))
         worker.error.connect(errores.append)
         worker.start()
 
-        # Mantiene la UI viva sin recursión de event loops anidados propios.
+        # Mantiene la UI viva sin anidar event loops propios.
         while not worker.wait(30):
             QApplication.processEvents()
         progreso.close()
 
         if errores or not worker.ok:
             detalle = errores[0] if errores else "La impresión no se completó."
-            QMessageBox.critical(
-                parent, "Error de impresión",
-                f"No se pudo imprimir:\n\n{detalle}",
-            )
+            if worker.impresas:
+                detalle += (f"\n\nSe alcanzaron a enviar {worker.impresas} "
+                            f"de {len(paginas)} páginas.")
+            QMessageBox.critical(parent, "Error de impresión",
+                                 f"No se pudo imprimir:\n\n{detalle}")
             return False
 
         return True

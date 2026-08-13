@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
 )
 
 from modules.theme import SIZE, SPACE, repolish
+from modules.trabajo import formatear_paginas
 from modules.ui import (
     FilaAdaptable,
     abrir_en_sistema,
@@ -63,10 +64,20 @@ def _es_email_valido(email: str) -> bool:
 
 
 def _construir_resumen(nombre_doc: str, paginas: list) -> str:
-    nums = ", ".join(str(p + 1) for p in paginas)
+    """Resumen del documento para el cuerpo del correo.
+
+    Las páginas se muestran comprimidas ("1-4, 7" en vez de
+    "1, 2, 3, 4, 7"), que es como se leen en una lista larga.
+    """
+    if not paginas:
+        return (
+            f"Documento:              {nombre_doc}\n"
+            "Páginas reemplazadas:   (no registradas)"
+        )
+    plural = "s" if len(paginas) != 1 else ""
     return (
         f"Documento:              {nombre_doc}\n"
-        f"Páginas reemplazadas:   {nums}\n"
+        f"Página{plural} reemplazada{plural}:   {formatear_paginas(paginas)}\n"
         f"Total páginas firmadas: {len(paginas)}"
     )
 
@@ -237,10 +248,15 @@ class DialogoEnviarEmail(QDialog):
             return
 
         asunto = f"Documento Firmado: {self.nombre_doc}"
+        if self.paginas:
+            plural = "s" if len(self.paginas) != 1 else ""
+            detalle = (f"con la{plural} página{plural} "
+                       f"{formatear_paginas(self.paginas)} firmada{plural}")
+        else:
+            detalle = "con las páginas firmadas"
         cuerpo = (
             "Estimado/a,\n\n"
-            f"Adjunto encontrará el documento '{self.nombre_doc}' con las "
-            "páginas firmadas.\n\n"
+            f"Adjunto encontrará el documento '{self.nombre_doc}' {detalle}.\n\n"
             "Este mensaje fue preparado automáticamente por PDF Sign Assistant.\n"
         )
 

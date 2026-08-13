@@ -362,6 +362,13 @@ QPushButton:disabled {{
     border-color: transparent;
 }}
 
+/* Compacto: para botones angostos de acción rápida (rotar, ±90°…),
+   donde el padding normal de 18px se comería el texto. */
+QPushButton[compacto="true"] {{
+    padding: 4px 8px;
+    font-size: {f['small']}px;
+}}
+
 QPushButton[variant="danger"] {{
     background-color: {p['danger']};
     color: #ffffff;

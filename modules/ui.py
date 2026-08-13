@@ -58,15 +58,20 @@ def boton(
     height: int = SIZE["btn"],
     on_click=None,
     enabled: bool = True,
+    compacto: bool = False,
 ) -> QPushButton:
     """Crea un QPushButton estandarizado.
 
-    variant: primary | secondary | ghost | danger | success
+    variant:  primary | secondary | ghost | danger | success
+    compacto: reduce el padding, para botones angostos cuyo texto no
+              entraría con el padding normal (ej: "+90°").
     """
     if variant not in VARIANTES:
         variant = "primary"
     b = QPushButton(texto)
     b.setProperty("variant", variant)
+    if compacto:
+        b.setProperty("compacto", "true")
     b.setMinimumHeight(height)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     if fixed_w:

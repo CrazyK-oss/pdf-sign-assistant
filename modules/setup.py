@@ -14,6 +14,8 @@ antes main.py y settings.py tenían cada uno la suya.
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -35,6 +37,7 @@ CONFIG_PATH = BASE_DIR / "config.json"
 
 CARPETA_TRABAJO = BASE_DIR / "pdfs_trabajo"
 CARPETA_FIRMADO = BASE_DIR / "pdfs_firmados"
+CARPETA_LOGS    = BASE_DIR / "logs"
 FOLDERS = (CARPETA_TRABAJO, CARPETA_FIRMADO)
 
 # Valores por defecto de la configuración
@@ -91,3 +94,66 @@ def guardar_config(config: dict, ruta: Path | None = None) -> None:
 # Alias retrocompatible con el nombre anterior
 def load_config() -> dict:
     return cargar_config()
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+def configurar_logging(nivel: int = logging.INFO) -> Path:
+    """Deja el log en logs/pdf_sign_assistant.log, con rotación.
+
+    Es la única forma de ver qué pasó en la máquina del usuario: el .exe
+    se compila con `console=False`, así que todo lo que se imprimía por
+    consola (incluidos los traceback de las fases) simplemente se perdía.
+
+    Rota a los 512 KB y conserva 3 archivos: no crece sin control en una
+    PC que queda encendida meses.
+    """
+    CARPETA_LOGS.mkdir(parents=True, exist_ok=True)
+    archivo = CARPETA_LOGS / "pdf_sign_assistant.log"
+
+    raiz = logging.getLogger()
+    raiz.setLevel(nivel)
+
+    # Evita duplicar handlers si se llama dos veces
+    for h in list(raiz.handlers):
+        if getattr(h, "_psa", False):
+            return archivo
+
+    formato = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s — %(message)s")
+
+    handler = logging.handlers.RotatingFileHandler(
+        archivo, maxBytes=512 * 1024, backupCount=3, encoding="utf-8")
+    handler.setFormatter(formato)
+    handler._psa = True                              # type: ignore[attr-defined]
+    raiz.addHandler(handler)
+
+    # En modo script también conviene verlo por consola
+    if not getattr(sys, "frozen", False):
+        consola = logging.StreamHandler()
+        consola.setFormatter(formato)
+        consola._psa = True                          # type: ignore[attr-defined]
+        raiz.addHandler(consola)
+
+    return archivo
+
+
+def limpiar_trabajos_huerfanos(dias: int = 7) -> int:
+    """Borra copias viejas de pdfs_trabajo/ que quedaron de sesiones caídas.
+
+    Si la app se cierra de golpe (o se corta la luz) la copia de trabajo
+    queda ahí para siempre. Devuelve cuántas borró.
+    """
+    import time
+    limite = time.time() - dias * 86400
+    borrados = 0
+    try:
+        for pdf in CARPETA_TRABAJO.glob("*.pdf"):
+            try:
+                if pdf.stat().st_mtime < limite:
+                    pdf.unlink()
+                    borrados += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return borrados

@@ -90,6 +90,7 @@ hiddenimports = [
     "modules.settings",
     "modules.setup",
     "modules.theme",
+    "modules.trabajo",
     "modules.ui",
 ]
 

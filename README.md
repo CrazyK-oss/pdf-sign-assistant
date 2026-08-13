@@ -14,10 +14,13 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 
 ## Funcionalidades
 
-- 📄 **Vista previa en cuadrícula** — visualizá todas las páginas del PDF antes de elegir cuál firmar
-- 🖨️ **Impresión directa** — envía la página seleccionada a la impresora automáticamente
-- 🖼️ **Integración con escáner** — cargá o capturá la imagen escaneada de la página firmada
-- 🔄 **Reemplazo de página** — incrusta la firma escaneada de vuelta en el PDF original
+- 📄 **Vista previa en cuadrícula** — visualizá todas las páginas del PDF antes de elegir cuáles firmar
+- 🗂️ **Firma de varias páginas por sesión** — elegí 1, 3 o 20 páginas: se imprimen en un solo trabajo, se escanean en una cola y se reemplazan todas de una vez
+- 🔍 **Vista previa grande** — doble clic en una página para verla completa y decidir con seguridad
+- 🔄 **Rotación por página** — corregí escaneos al revés sin salir de la app ni tocar el archivo original
+- 🖨️ **Impresión directa** — envía las páginas seleccionadas a la impresora en un único trabajo
+- 🖼️ **Integración con escáner** — digitalizá cada hoja o cargá varias imágenes de una y se reparten solas entre las páginas pendientes
+- 📌 **Reemplazo de páginas** — incrusta cada hoja firmada en su página correspondiente del PDF original
 - 💾 **Lista de trabajos guardados** — historial de documentos procesados con fecha y hora; permite re-editar
 - ✉️ **Envío por correo** — abre tu cliente de correo con destinatario/asunto listos y una carpeta temporal con el PDF adjuntable
 - ⚙️ **Panel de ajustes** — configurá el correo emisor (servidor, puerto, credenciales) desde la UI, sin tocar archivos de configuración
@@ -25,6 +28,8 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 - 📐 **Interfaz adaptable** — las pantallas reacomodan columnas y apilan paneles cuando la ventana es angosta; todo entra desde 460 px de ancho
 - ⌨️ **Atajos de teclado** — flujo completo sin mouse (ver tabla más abajo)
 - 🔎 **Búsqueda en guardados** — filtrá el historial por nombre a medida que escribís
+- 🧾 **Registro en el propio PDF** — el documento guarda qué páginas se firmaron, así al reabrirlo o enviarlo el resumen es exacto
+- 📋 **Log en archivo** — `logs/pdf_sign_assistant.log` con rotación, para diagnosticar problemas en la PC del usuario
 - 🔒 **Cancelación segura** — cancelá en cualquier etapa sin corromper el archivo original
 
 ---
@@ -32,16 +37,21 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 ## Flujo de trabajo
 
 ```
-Abrir PDF  →  Vista previa  →  Imprimir página  →  Escanear página firmada  →  Guardar PDF  →  Enviar
+Abrir PDF  →  Elegir páginas  →  Imprimir  →  Escanear cada hoja firmada  →  Guardar PDF  →  Enviar
 ```
+
+Se pueden firmar **varias páginas en una misma sesión**. La selección, las
+imágenes de cada página y sus rotaciones viven en un único objeto
+(`modules/trabajo.py`), así que volver atrás en cualquier paso conserva lo
+que ya habías hecho.
 
 | Paso | Módulo | Descripción |
 |------|--------|-------------|
 | 1 | `main.py` | Abrir un PDF y cargarlo en la sesión de trabajo |
-| 2 | `fase1_preview.py` | Cuadrícula desplazable de miniaturas; selección de la página objetivo |
-| 3 | `fase2_print.py` | Envío de la página seleccionada a la impresora del sistema |
-| 4 | `fase3_scan.py` | Carga de la imagen escaneada/fotografiada de la página firmada |
-| 5 | `fase_guardar.py` | Vista previa del resultado, confirmación y guardado del PDF firmado |
+| 2 | `fase1_preview.py` | Cuadrícula de miniaturas; selección múltiple y vista previa grande |
+| 3 | `fase2_print.py` | Envío de todas las páginas elegidas en un solo trabajo de impresión |
+| 4 | `fase3_scan.py` | Cola de escaneo: una imagen por página, con rotación y avisos de orientación |
+| 5 | `fase_guardar.py` | Reemplazo de todas las páginas, metadatos y guardado del PDF firmado |
 | 6 | `fase4_email.py` | Flujo de envío: carpeta temporal + apertura del cliente de correo |
 
 ---
@@ -57,6 +67,7 @@ pdf-sign-assistant/
 ├── requirements.txt         # Dependencias de Python
 ├── pdf_sign_assistant.spec  # Configuración de PyInstaller para generar el .exe
 ├── pdfs_trabajo/            # Copias de trabajo temporales (auto-creado, gitignored)
+├── logs/                    # Log rotativo de la aplicación (auto-creado, gitignored)
 ├── pdfs_firmados/           # Documentos firmados finales (auto-creado, gitignored)
 │   └── _envio_temp/         # Carpeta temporal para adjuntar en correos (se borra al cerrar la app)
 └── modules/
@@ -64,6 +75,7 @@ pdf-sign-assistant/
     ├── setup.py             # Rutas compatibles con PyInstaller + carga/guardado de config
     ├── theme.py             # Sistema de diseño: paletas, tokens (espaciado/radios/tipografía), stylesheet
     ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
+    ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── settings.py          # Diálogo de ajustes de correo emisor (SMTP, credenciales)
     ├── fase1_preview.py     # Cuadrícula de miniaturas y selección de página
     ├── fase2_print.py       # Integración con la impresora del sistema
@@ -100,10 +112,19 @@ La carpeta `_envio_temp/` se borra **al cerrar la app** y también **al iniciarl
 | `F5` | Recargar la lista de documentos |
 | `Enter` | Editar el documento seleccionado |
 
-Dentro de la vista de páginas: `←` `→` `↑` `↓` para moverte por la cuadrícula,
-`Inicio`/`Fin` para saltar a la primera o última página, `Enter` (o doble clic)
-para confirmar y `Esc` para salir. En escaneo y guardado: `Esc` vuelve atrás y
-`Enter` confirma.
+**Al elegir páginas:** `←` `→` `↑` `↓` recorren la cuadrícula, `Inicio`/`Fin`
+saltan a la primera o última página, `Espacio` (o doble clic) abre la vista
+previa grande, `Ctrl+A` selecciona todas, `Ctrl+F` va al campo de rangos,
+`Enter` confirma y `Esc` sale.
+
+**Selección múltiple:** clic alterna una página, `Shift+clic` marca un rango
+desde la última tocada, y el campo *Páginas* acepta expresiones como
+`1, 3, 5-8`.
+
+**En la vista previa grande:** `←` `→` cambian de página, `Espacio` marca o
+desmarca, `Esc` cierra.
+
+**En escaneo y guardado:** `Esc` vuelve atrás y `Enter` confirma.
 
 ---
 
@@ -220,6 +241,29 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 
 ## Changelog
 
+### v0.7 — Firma de varias páginas por sesión *(actual)*
+
+**Multipágina de punta a punta**
+- **Selección múltiple** en la cuadrícula: clic alterna, `Shift+clic` marca un rango, `Ctrl+A` selecciona todas y un campo de texto acepta expresiones tipo `1, 3, 5-8`
+- **Vista previa grande** (doble clic o `Espacio`): la página completa, con navegación por flechas y selección desde ahí. Los thumbnails no alcanzan cuando el documento tiene hojas parecidas entre sí
+- **Un solo trabajo de impresión** para todas las páginas elegidas: la cola de la impresora muestra un único ítem y ningún otro trabajo se intercala en el medio. Se renderiza de a una página por vez, así 20 hojas no levantan cientos de MB
+- **Cola de escaneo**: una fila por página, con su miniatura y su estado. "Digitalizar siguiente" salta sola a la próxima pendiente al terminar cada escaneo; "Cargar imágenes…" y el drag & drop aceptan varios archivos y los reparten en orden
+- **Reemplazo múltiple** en una sola pasada de escritura, con progreso repartido entre las páginas
+
+**Lógica reforzada**
+- Nuevo `modules/trabajo.py`: el estado del trabajo (páginas, imágenes, rotaciones) deja de estar suelto en atributos de la ventana y pasa a un modelo con invariantes garantizadas — selección siempre ordenada y dentro de rango, sin imágenes huérfanas de páginas que se quitaron. Es lógica pura, sin Qt, y está cubierta por tests
+- Volver atrás en cualquier fase **conserva lo ya hecho**: la selección de páginas y las imágenes asignadas sobreviven al ir y venir entre pantallas
+- Se corrigió el resumen del correo, que decía **"página 1" fijo** sin importar qué se hubiera firmado: ahora las páginas quedan registradas en los metadatos del PDF (`/PSAPaginas`) y se leen al enviarlo o al re-editarlo
+- Al re-editar un documento ya firmado, la app **propone de entrada las mismas páginas**
+- Validaciones nuevas: páginas fuera del rango del documento, imágenes que desaparecieron entre el escaneo y el guardado, y páginas pendientes al intentar guardar
+
+**Funciones nuevas**
+- **Rotación por página** (`-90°` / `+90°`): el escáner devuelve la hoja al revés muy seguido. La rotación se aplica al generar el PDF y **nunca toca el archivo original**. Verificado que coincide exactamente con lo que muestra la vista previa
+- **Aviso de orientación cruzada**: si la imagen es apaisada y la página es vertical (o viceversa), la fila lo señala — casi siempre es un escaneo mal orientado
+- **Log a archivo** en `logs/pdf_sign_assistant.log`, con rotación a 512 KB y 3 archivos de historial. El `.exe` se compila con `console=False`, así que hasta ahora **cualquier error en la máquina del usuario se perdía sin dejar rastro**
+- **Limpieza de copias huérfanas**: `pdfs_trabajo/` acumulaba archivos para siempre si la app se cerraba de golpe; ahora se borran las de más de 7 días al arrancar
+- **Variante compacta de botón** en el sistema de diseño, para acciones angostas cuyo texto no entraba con el padding normal
+
 ### v0.6 — Rendimiento, estandarización visual y responsive *(actual)*
 
 **Rendimiento**
@@ -298,7 +342,7 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 
 ## Roadmap
 
-- [ ] **Firma de múltiples páginas** — seleccionar y procesar varias páginas en una sola sesión
+- [x] ~~**Firma de múltiples páginas** — seleccionar y procesar varias páginas en una sola sesión~~ *(v0.7)*
 - [ ] **Procesamiento por lotes** — poner en cola varios PDFs y firmarlos secuencialmente
 - [ ] **Firma digital criptográfica** — incrustar firmas digitales sin necesidad de imprimir
 - [ ] **Exportar como ZIP** — empaquetar el PDF firmado junto con sus imágenes escaneadas
@@ -317,3 +361,6 @@ El ejecutable se genera en `dist/PDF Sign Assistant/`. Distribuid **siempre la c
 - Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.
 - La conversión imagen → PDF intenta tres motores en orden: **reportlab** → **img2pdf** (en subproceso aislado, porque puede crashear a nivel de extensión C) → **Pillow**.
 - La ventana principal vigila `pdfs_firmados/` con `QFileSystemWatcher`: si agregás o borrás archivos desde el Explorador, la lista se actualiza sola.
+- Las páginas firmadas quedan registradas en los metadatos del PDF, bajo la clave `/PSAPaginas` (índices 0-based separados por coma). Los documentos firmados con versiones anteriores no la tienen: en ese caso el resumen del correo indica "no registradas".
+- La rotación de una hoja escaneada **no modifica la imagen original**: se aplica sobre una copia temporal al momento de generar el PDF.
+- Si la app se cierra de golpe, las copias de trabajo quedan en `pdfs_trabajo/`; las de más de 7 días se borran solas en el siguiente arranque.
