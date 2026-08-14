@@ -308,3 +308,37 @@ def test_descarga_rechaza_archivo_gigante(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         act.descargar_verificado(_info(con_sumas=False), carpeta=tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_sha256_esperado_lee_el_formato_que_genera_el_workflow(monkeypatch):
+    """Fija el contrato entre release.yml y el actualizador.
+
+    El paso "Calcular checksums" produce `hash<2 espacios>nombre` con el
+    hash en minúsculas. Si ese formato cambiara, el actualizador dejaría
+    de poder verificar la descarga —y nadie se enteraría hasta que una
+    actualización fallara en la máquina de un usuario.
+    """
+    real = (
+        "6d0043fc146eac816420af1f4637076a82223f35f299abc2ea887e651ea97f7b"
+        "  PDFSignAssistant-0.10.0-Setup.exe\n"
+        "be9ca2d07a933c06d6d7964e2fdc91823fa18aeba8a998fd5c0d65ec8c38fcb8"
+        "  PDFSignAssistant-0.10.0-portable.zip\n"
+    )
+
+    class R:
+        def read(self):
+            return real.encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(act, "_abrir", lambda *a, **k: R())
+
+    hash_setup = act.sha256_esperado("u", "PDFSignAssistant-0.10.0-Setup.exe")
+    assert hash_setup == (
+        "6d0043fc146eac816420af1f4637076a82223f35f299abc2ea887e651ea97f7b")
+    assert len(hash_setup) == 64
+    assert hash_setup == hash_setup.lower()

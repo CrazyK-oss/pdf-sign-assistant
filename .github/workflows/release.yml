@@ -77,10 +77,41 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: Armar el instalador
+        shell: pwsh
         run: |
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
-            "installer\pdf_sign_assistant.iss" `
-            "/DAppVersion=${{ steps.version.outputs.version }}"
+          # OJO con "$env:ProgramFiles(x86)": NO funciona. PowerShell corta
+          # el nombre de la variable en el paréntesis y concatena "(x86)"
+          # como texto suelto, dando "C:\Program Files(x86)" —sin el
+          # espacio—, que no existe. Los nombres de variable con paréntesis
+          # necesitan llaves: ${env:ProgramFiles(x86)}.
+          $candidatos = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            "$env:ChocolateyInstall\bin\ISCC.exe"
+          )
+          $iscc = $candidatos |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+            Select-Object -First 1
+
+          if (-not $iscc) {
+            # Último recurso: el shim que deja Chocolatey en el PATH
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+
+          if (-not $iscc) {
+            Write-Host "::error::No se encontró ISCC.exe. Rutas probadas:"
+            $candidatos | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+
+          Write-Host "Inno Setup encontrado en: $iscc"
+          & $iscc "installer\pdf_sign_assistant.iss" `
+                  "/DAppVersion=${{ steps.version.outputs.version }}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::ISCC devolvió $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
 
       # ZIP portable: para quien no quiere o no puede instalar nada.
       # El portable.txt hace que la app guarde todo junto al ejecutable.
