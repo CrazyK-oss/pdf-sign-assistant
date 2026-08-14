@@ -3,16 +3,23 @@ tests/test_dispositivos.py
 ============================================================
 Tests de la capa de dispositivos (modules/dispositivos.py).
 
-Estos tests existen porque los drivers de impresora y escáner NO se
-pueden probar en CI: no hay hardware. Al aislar el saneamiento de
-capacidades y la traducción de errores en funciones puras, se puede
-verificar justamente la parte que rompe en producción.
+Estos tests existen porque los drivers de impresora y escáner casi no se
+pueden probar en CI. Al aislar el saneamiento de capacidades y la
+traducción de errores en funciones puras, se puede verificar justamente
+la parte que rompe en producción.
+
+Corren en las DOS plataformas: el job de CI en Linux y el de Release en
+windows-latest. Lo que difiere entre ambas se declara explícitamente —un
+runner de Windows sí tiene "Microsoft Print to PDF" y sí inicializa COM—
+en vez de asumir que no hay dispositivos.
 
 Cubren los dos fallos reales que tenía el código:
   - un driver que informa 0 DPI provocaba ZeroDivisionError
   - un driver que informa 0 de área imprimible hacía que se imprimiera
     una hoja EN BLANCO, sin ningún aviso
 """
+
+import sys
 
 import pytest
 
@@ -173,24 +180,54 @@ def test_errores_reales_no_se_confunden_con_cancelacion(texto):
     assert not es_cancelacion_usuario(Exception(texto))
 
 
-# ── Degradación fuera de Windows ──────────────────────────────────────────────
+# ── Comportamiento según la plataforma ────────────────────────────────────────
+#  El job de CI corre en Linux y el de Release en windows-latest, así que
+#  estos tests se ejecutan en AMBOS. Lo que cambia entre plataformas se
+#  declara explícitamente en vez de asumir una: un runner de Windows sí
+#  tiene impresora ("Microsoft Print to PDF") y sí puede inicializar COM.
 
-def test_listar_sin_windows_devuelve_vacio():
+ES_WINDOWS = sys.platform == "win32"
+
+
+def _hay_com() -> bool:
+    """True si pywin32 está disponible para hablar COM."""
+    from modules.dispositivos import _importar_com
+    return _importar_com() is not None
+
+
+def test_listar_impresoras_cumple_el_contrato():
+    """Devuelve siempre una lista de nombres, sin lanzar, en cualquier SO."""
+    from modules.dispositivos import listar_impresoras
+
+    impresoras = listar_impresoras()
+    assert isinstance(impresoras, list)
+    assert all(isinstance(n, str) and n for n in impresoras)
+
+
+def test_listar_escaneres_cumple_el_contrato():
+    from modules.dispositivos import DispositivoEscaner, listar_escaneres
+
+    escaneres = listar_escaneres()
+    assert isinstance(escaneres, list)
+    assert all(isinstance(e, DispositivoEscaner) for e in escaneres)
+    assert all(isinstance(str(e), str) for e in escaneres)
+
+
+@pytest.mark.skipif(ES_WINDOWS, reason="Comprueba la degradación fuera de Windows")
+def test_sin_windows_no_hay_dispositivos():
     """En Linux/macOS la app tiene que seguir funcionando, sin dispositivos."""
     from modules.dispositivos import listar_escaneres, listar_impresoras
+
     assert listar_impresoras() == []
     assert listar_escaneres() == []
 
 
-def test_verificaciones_explican_la_falta_de_soporte():
-    import sys
-
+@pytest.mark.skipif(ES_WINDOWS, reason="Comprueba la degradación fuera de Windows")
+def test_sin_windows_las_verificaciones_lo_explican():
     from modules.dispositivos import (
         verificar_escaneo_disponible,
         verificar_impresion_disponible,
     )
-    if sys.platform == "win32":
-        pytest.skip("Este test comprueba la degradación fuera de Windows")
 
     for verificar in (verificar_impresion_disponible, verificar_escaneo_disponible):
         with pytest.raises(ErrorDispositivo) as info:
@@ -199,11 +236,38 @@ def test_verificaciones_explican_la_falta_de_soporte():
         assert info.value.sugerencia          # debe ofrecer una alternativa
 
 
-def test_com_inicializado_no_rompe_fuera_de_windows():
+@pytest.mark.skipif(not ES_WINDOWS, reason="Sólo aplica en Windows")
+def test_en_windows_la_verificacion_acompaña_al_estado_real():
+    """Con impresora instalada no debe lanzar; sin ninguna, debe explicarlo.
+
+    En un runner de GitHub existe "Microsoft Print to PDF", así que lo
+    normal es que pase por la primera rama.
+    """
+    from modules.dispositivos import listar_impresoras, verificar_impresion_disponible
+
+    if listar_impresoras():
+        verificar_impresion_disponible()          # no debe lanzar
+    else:
+        with pytest.raises(ErrorDispositivo) as info:
+            verificar_impresion_disponible()
+        assert "impresora" in info.value.mensaje.lower()
+
+
+def test_com_inicializado_no_lanza_nunca():
+    """El contexto siempre entra y sale limpio; lo que cambia es si hay COM.
+
+    En Windows con pywin32 inicializa de verdad (y libera al salir);
+    en el resto devuelve False sin romper nada.
+    """
     from modules.dispositivos import com_inicializado
 
     with com_inicializado() as ok:
-        assert ok is False          # no hay COM, pero tampoco excepción
+        assert isinstance(ok, bool)
+        assert ok is _hay_com()
+
+    # Reentrante: llamarlo dos veces seguidas no debe dejar COM colgado
+    with com_inicializado() as ok2:
+        assert ok2 is _hay_com()
 
 
 # ── Flujo de adquisición con un escáner simulado ──────────────────────────────
@@ -302,3 +366,66 @@ def test_adquirir_imagen_pasa_el_selector_de_dispositivo(tmp_path, monkeypatch):
 
     adquirir_imagen(str(tmp_path / "b.png"), elegir_dispositivo=False)
     assert dialogo.args[4] is False
+
+
+# ── Ramas de Windows, simuladas ───────────────────────────────────────────────
+#  Las verificaciones tienen tres salidas (no es Windows / falta pywin32 /
+#  no hay dispositivos). En un runner concreto sólo se recorre una. Acá se
+#  fuerzan todas, para que queden cubiertas corra donde corra la suite.
+
+def _fingir_windows(monkeypatch, *, con_pywin32=True, impresoras=(), escaneres=()):
+    from modules import dispositivos as d
+
+    monkeypatch.setattr(d.sys, "platform", "win32")
+    monkeypatch.setattr(d, "_importar_win32",
+                        lambda: (object(), object(), object()) if con_pywin32 else None)
+    monkeypatch.setattr(d, "_importar_com",
+                        lambda: (object(), object()) if con_pywin32 else None)
+    monkeypatch.setattr(d, "listar_impresoras", lambda: list(impresoras))
+    monkeypatch.setattr(d, "listar_escaneres", lambda: list(escaneres))
+
+
+def test_windows_sin_pywin32_pide_instalarlo(monkeypatch):
+    from modules.dispositivos import verificar_impresion_disponible
+
+    _fingir_windows(monkeypatch, con_pywin32=False)
+    with pytest.raises(ErrorDispositivo) as info:
+        verificar_impresion_disponible()
+    assert "pywin32" in info.value.sugerencia
+
+
+def test_windows_sin_impresoras_lo_dice_claro(monkeypatch):
+    """No es lo mismo "falta una dependencia" que "no tenés impresora"."""
+    from modules.dispositivos import verificar_impresion_disponible
+
+    _fingir_windows(monkeypatch, impresoras=[])
+    with pytest.raises(ErrorDispositivo) as info:
+        verificar_impresion_disponible()
+    assert "impresora" in info.value.mensaje.lower()
+    assert "Configuración" in info.value.sugerencia     # dónde agregarla
+
+
+def test_windows_con_impresora_no_se_queja(monkeypatch):
+    from modules.dispositivos import verificar_impresion_disponible
+
+    _fingir_windows(monkeypatch, impresoras=["Microsoft Print to PDF"])
+    verificar_impresion_disponible()          # no debe lanzar
+
+
+def test_windows_sin_escaner_sugiere_cargar_del_disco(monkeypatch):
+    """Sin escáner la app sigue siendo usable: hay que decírselo al usuario."""
+    from modules.dispositivos import verificar_escaneo_disponible
+
+    _fingir_windows(monkeypatch, escaneres=[])
+    with pytest.raises(ErrorDispositivo) as info:
+        verificar_escaneo_disponible()
+    assert "escáner" in info.value.mensaje.lower()
+    assert "disco" in info.value.sugerencia.lower()
+
+
+def test_windows_con_escaner_no_se_queja(monkeypatch):
+    from modules.dispositivos import DispositivoEscaner, verificar_escaneo_disponible
+
+    _fingir_windows(monkeypatch,
+                    escaneres=[DispositivoEscaner(id="w1", nombre="HP LaserJet")])
+    verificar_escaneo_disponible()            # no debe lanzar
