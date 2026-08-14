@@ -1,11 +1,22 @@
-PyQt6
-pymupdf
-Pillow
-img2pdf
-pypdf
-watchdog
-pywin32
-reportlab
-python-dotenv
-pyinstaller
-exchangelib
+# PDF Sign Assistant — dependencias
+#   pip install -r requirements.txt
+#
+# Nota: exchangelib y watchdog estaban listados pero ningún módulo los
+# importa (el envío pasó a mailto: y no hay vigilancia de carpetas por
+# watchdog). Se quitaron: exchangelib solo arrastraba lxml, dnspython y
+# compañía al bundle de PyInstaller.
+
+# ── Núcleo ────────────────────────────────────────────────────────────
+PyQt6>=6.5                 # UI
+pymupdf>=1.23              # render de páginas (fitz)
+pypdf>=4.0                 # lectura/escritura del PDF final
+Pillow>=10.0               # normalización de imágenes
+reportlab>=4.0             # motor principal imagen → PDF
+img2pdf>=0.5               # motor alternativo (subproceso aislado)
+python-dotenv>=1.0         # carga opcional de .env
+
+# ── Sólo Windows ──────────────────────────────────────────────────────
+pywin32>=306; sys_platform == "win32"    # impresión GDI + escaneo WIA
+
+# ── Build ─────────────────────────────────────────────────────────────
+pyinstaller>=6.0

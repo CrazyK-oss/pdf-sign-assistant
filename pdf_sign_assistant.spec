@@ -20,6 +20,43 @@ from PyInstaller.utils.hooks import collect_data_files
 
 ROOT = Path(SPEC).parent  # directorio raíz del proyecto
 
+# ── Versión ───────────────────────────────────────────────────────────────────
+# Se lee de modules/version.py para no tener el número duplicado en tres
+# archivos (app, instalador y workflow leen todos de ahí).
+_ns: dict = {}
+exec((ROOT / "modules" / "version.py").read_text(encoding="utf-8"), _ns)
+APP_VERSION = _ns["__version__"]
+APP_NOMBRE  = _ns["APP_NOMBRE"]
+APP_AUTOR   = _ns["AUTOR"]
+_v = _ns["version_tupla"]()
+print(f"[SPEC] {APP_NOMBRE} {APP_VERSION}")
+
+# Recurso VERSIONINFO: sin esto, el .exe aparece sin nombre ni versión en
+# las propiedades de Windows, y eso alimenta las alertas de SmartScreen.
+_version_file = ROOT / "build" / "version_info.txt"
+_version_file.parent.mkdir(parents=True, exist_ok=True)
+_version_file.write_text(f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={_v}, prodvers={_v},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040a04b0', [
+        StringStruct('CompanyName', '{APP_AUTOR}'),
+        StringStruct('FileDescription', '{APP_NOMBRE}'),
+        StringStruct('FileVersion', '{APP_VERSION}'),
+        StringStruct('InternalName', '{APP_NOMBRE}'),
+        StringStruct('LegalCopyright', 'MIT License'),
+        StringStruct('OriginalFilename', '{APP_NOMBRE}.exe'),
+        StringStruct('ProductName', '{APP_NOMBRE}'),
+        StringStruct('ProductVersion', '{APP_VERSION}')])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1034, 1200])])
+  ]
+)""", encoding="utf-8")
+
 # ── Localizar python3XX.dll ───────────────────────────────────────────────────
 # Cuando se trabaja dentro de un venv, sys.exec_prefix apunta al venv y
 # la DLL no está ahí — vive en la instalación base de Python.
@@ -50,11 +87,22 @@ if _python_dll_path is None:
     )
 
 # ── Datos a incluir en el bundle ──────────────────────────────────────────────
+# config.json ya no se versiona (lo escribe el diálogo de Ajustes y puede
+# tener credenciales), así que sólo se incluye si existe en el checkout.
+# Sin él la app arranca igual: modules.setup.cargar_config() cae en los
+# valores por defecto.
 datas = [
-    (str(ROOT / "config.json"), "."),
     *collect_data_files("fitz"),
     *collect_data_files("PyQt6"),
 ]
+
+for _cfg in ("config.json", "config.example.json"):
+    if (ROOT / _cfg).is_file():
+        datas.append((str(ROOT / _cfg), "."))
+
+# Icono de la ventana (además del icono del .exe)
+if (ROOT / "assets").is_dir():
+    datas.append((str(ROOT / "assets" / "icon.png"), "assets"))
 
 # ── Hidden imports ────────────────────────────────────────────────────────────
 hiddenimports = [
@@ -75,6 +123,8 @@ hiddenimports = [
     "win32print",
     "win32gui",
     "pywintypes",
+    "modules.actualizador",
+    "modules.dispositivos",
     "modules.fase1_preview",
     "modules.fase2_print",
     "modules.fase3_scan",
@@ -82,6 +132,10 @@ hiddenimports = [
     "modules.fase_guardar",
     "modules.settings",
     "modules.setup",
+    "modules.theme",
+    "modules.trabajo",
+    "modules.ui",
+    "modules.version",
 ]
 
 # ── Binarios extra ────────────────────────────────────────────────────────────
@@ -112,7 +166,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PySimpleGUI", "tkinter", "unittest"],
+    # exchangelib y watchdog ya no se usan; excluirlos evita arrastrar
+    # lxml/dnspython/tzlocal al bundle si están en el entorno.
+    excludes=[
+        "PySimpleGUI", "tkinter", "unittest",
+        "exchangelib", "watchdog", "lxml", "dnspython", "tzlocal",
+    ],
     noarchive=False,
     optimize=1,
 )
@@ -128,14 +187,17 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX comprime el binario pero DISPARA falsos positivos de antivirus en
+    # ejecutables de PyInstaller. Para distribución pública no vale la pena.
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/icon.ico",
+    icon=str(ROOT / "assets" / "icon.ico"),
+    version=str(_version_file),
 )
 
 coll = COLLECT(
@@ -143,7 +205,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="PDF Sign Assistant",
 )

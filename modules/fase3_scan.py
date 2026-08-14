@@ -1,165 +1,329 @@
-# modules/fase3_scan.py
-# Fase 3: Stand-by post-impresión.
-# Digitalización directa via WIA (Windows Image Acquisition) + carga manual.
-#
-# Mejoras en esta versión:
-# - WIA: Intent=4 (MaximumQuality) + DPI explícito a 600 para máxima
-#   resolución de escaneo. Fuerza el escáner a trabajar en color a 600 DPI
-#   en lugar del default (200-300 DPI que WIA usa si no se especifica).
-# - FormatID PNG conservado para escaneo sin pérdida.
-# - Limpieza de temporales y control de flujo sin cambios.
+"""
+modules/fase3_scan.py
+============================================================
+Fase 3: stand-by post-impresión. Se digitaliza (o se carga) la hoja
+firmada de CADA página seleccionada.
 
+De una imagen a una cola
+------------------------
+Antes esta pantalla manejaba una sola imagen para una sola página.
+Ahora muestra una fila por página elegida, cada una con su estado, su
+miniatura y sus acciones. El botón "Continuar" se habilita recién
+cuando todas las páginas tienen imagen.
+
+Formas de asignar imágenes:
+  - "Digitalizar" en una fila → escanea directo a esa página
+  - "Digitalizar siguiente" → toma la próxima página pendiente y, al
+    terminar, salta sola a la que sigue (flujo natural: firmás, escaneás,
+    firmás la siguiente…)
+  - "Cargar imágenes…" admite selección múltiple y las reparte en orden
+    entre las páginas pendientes
+  - Arrastrar varios archivos a la zona de drop hace lo mismo
+
+Además
+------
+* Rotación por página (-90° / +90°): el escáner devuelve la hoja al
+  revés muy seguido. La rotación se guarda en el modelo y se aplica al
+  generar el PDF, sin tocar el archivo original.
+* Aviso de orientación: si la imagen es apaisada y la página es vertical
+  (o viceversa) se avisa en la fila, porque casi siempre es un escaneo
+  mal orientado.
+* closeEvent no bloquea la UI esperando al escáner.
+"""
+
+from __future__ import annotations
+
+import logging
 import os
-import glob
-import uuid
 import tempfile
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QSizePolicy, QSpacerItem, QFileDialog, QMessageBox
-)
+import uuid
+from pathlib import Path
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QFont, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap, QTransform
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from modules.dispositivos import (
+    ErrorDispositivo,
+    adquirir_imagen,
+    com_inicializado,
+    es_cancelacion_usuario,
+    interpretar_error_wia,
+    listar_escaneres,
+    verificar_escaneo_disponible,
+)
+from modules.theme import SIZE, SPACE, repolish, theme_signals
+from modules.trabajo import TrabajoFirma
+from modules.ui import (
+    AreaScroll,
+    BarraInferior,
+    BarraSuperior,
+    FilaAdaptable,
+    boton,
+    etiqueta,
+    tarjeta,
+)
+
+EXTENSIONES_IMG = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")
+FILTRO_IMG = "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp)"
+PREFIJO_TEMP = "pdf_sign_scan_"
+
+# Los workers WIA se registran acá para que sigan vivos aunque la vista
+# se cierre: destruir un QThread en ejecución revienta el proceso.
+_WORKERS_VIVOS: set[QThread] = set()
+
+log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  Worker: Lanza el diálogo WIA en hilo aparte
+#  Worker: lanza el diálogo WIA en hilo aparte
 # ─────────────────────────────────────────────────────────────────────────
 class WIAScanWorker(QThread):
+    """Abre el diálogo de digitalización de WIA en un hilo aparte.
+
+    Puntos delicados que resuelve:
+      * COM se inicializa EN ESTE HILO. pywin32 no lo hace solo, y sin
+        eso toda llamada falla con "CoInitialize has not been called".
+        El usuario veía un error genérico del escáner y salía a revisar
+        cables, cuando el problema era del código.
+      * Los com_error se traducen a mensajes con causa y sugerencia.
+      * Si hay más de un escáner, se le deja elegir.
+    """
+
     scan_completado = pyqtSignal(str)
     scan_cancelado  = pyqtSignal()
-    scan_error      = pyqtSignal(str)
+    scan_error      = pyqtSignal(object)    # ErrorDispositivo
 
-    # DPI objetivo para el escaneo. 600 es el máximo práctico para
-    # documentos: captura firma, texto y sellos sin artefactos.
-    # 300 es suficiente para documentos simples; 600 se recomienda
-    # cuando el documento tiene sellos húmedos o firmas detalladas.
+    # DPI objetivo. 300 alcanza para documentos simples; 600 se recomienda
+    # cuando hay sellos húmedos o firmas con detalle fino.
     DPI_SCAN = 600
 
+    def __init__(self, elegir_dispositivo: bool = False, parent=None):
+        super().__init__(parent)
+        self._elegir_dispositivo = elegir_dispositivo
+
     def run(self):
+        nombre = f"{PREFIJO_TEMP}{uuid.uuid4().hex[:8]}.png"
+        ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
         try:
-            import win32com.client
+            # COM se inicializa EN ESTE HILO: sin esto, toda llamada WIA
+            # falla con "CoInitialize has not been called".
+            with com_inicializado() as ok:
+                if not ok:
+                    raise ErrorDispositivo(
+                        "No se pudieron cargar los componentes de Windows "
+                        "para escanear.",
+                        sugerencia="Instalalos con:  pip install pywin32")
 
-            # Limpiar temporales anteriores
-            for f in glob.glob(
-                os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
-            ):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+                adquirir_imagen(ruta_destino, dpi=self.DPI_SCAN,
+                                elegir_dispositivo=self._elegir_dispositivo)
+                self.scan_completado.emit(ruta_destino)
 
-            wia = win32com.client.Dispatch("WIA.CommonDialog")
-
-            # ShowAcquireImage(
-            #   DeviceType:         1 = Scanner
-            #   Intent:             1 = Color
-            #   Bias:               4 = MaximumQuality
-            #   FormatID:           PNG sin pérdida
-            #   AlwaysSelectDevice: False (usa escáner por defecto)
-            #   UseCommonUI:        True  (diálogo completo WIA)
-            #   CancelError:        True  (excepción si el usuario cancela)
-            # )
-            img_wia = wia.ShowAcquireImage(
-                1,   # DeviceType = Scanner
-                1,   # Intent     = Color
-                4,   # Bias       = MaximumQuality
-                "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}",  # PNG
-                False,
-                True,
-                True,
-            )
-
-            # Intentar forzar DPI en el dispositivo WIA si está disponible.
-            # Algunos escáneres exponen la propiedad HorizontalResolution (6147)
-            # y VerticalResolution (6148) a través de la imagen WIA.
-            # Si no está disponible, el diálogo de WIA ya permite al usuario
-            # seleccionar la resolución manualmente.
-            try:
-                img_wia.Properties("6147").Value = self.DPI_SCAN  # H-resolution
-                img_wia.Properties("6148").Value = self.DPI_SCAN  # V-resolution
-            except Exception:
-                pass  # Propiedad no disponible en este escáner/driver
-
-            nombre       = f"pdf_sign_scan_{uuid.uuid4().hex[:8]}.png"
-            ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
-            img_wia.SaveFile(ruta_destino)
-            self.scan_completado.emit(ruta_destino)
-
-        except Exception as e:
-            msg = str(e).lower()
-            if any(x in msg for x in ["cancel", "0x80210003", "user cancel"]):
+        except ErrorDispositivo as e:
+            self.scan_error.emit(e)
+        except Exception as e:                       # noqa: BLE001
+            if es_cancelacion_usuario(e):
                 self.scan_cancelado.emit()
             else:
-                self.scan_error.emit(str(e))
+                self.scan_error.emit(interpretar_error_wia(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Zona de drag & drop
 # ─────────────────────────────────────────────────────────────────────────
 class ZonaDrop(QFrame):
-    imagen_soltada = pyqtSignal(str)
-
-    _ESTILO_BASE = """
-        ZonaDrop {{
-            background: {bg};
-            border: 2px dashed {border};
-            border-radius: 10px;
-        }}
-    """
+    imagenes_soltadas = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("zonaDrop")
         self.setAcceptDrops(True)
-        self.setMinimumHeight(120)
-        self._set_estado_normal()
+        self.setMinimumHeight(90)
+        self.setProperty("activo", "false")
 
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setSpacing(6)
+        lay.setSpacing(SPACE["xs"])
 
-        self.lbl_icono = QLabel("⬇")
-        self.lbl_icono.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_icono.setStyleSheet(
-            "font-size: 26px; color: #bab9b4; border: none; background: transparent;"
-        )
+        self.lbl_icono = etiqueta("⬇", rol="hint", align=Qt.AlignmentFlag.AlignCenter)
+        self.lbl_icono.setStyleSheet("font-size: 22px;")
         lay.addWidget(self.lbl_icono)
 
-        lbl_txt = QLabel("Arrastra una imagen aquí")
-        lbl_txt.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_txt.setStyleSheet(
-            "color: #7a7974; font-size: 12px; border: none; background: transparent;"
-        )
-        lay.addWidget(lbl_txt)
+        self.lbl_texto = etiqueta(
+            "Arrastrá acá las imágenes escaneadas\n"
+            "(se reparten en orden entre las páginas pendientes)",
+            rol="hint", align=Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.lbl_texto)
 
-    def _set_estado_normal(self):
-        self.setStyleSheet(
-            self._ESTILO_BASE.format(bg="#f3f0ec", border="rgba(40,37,29,0.18)")
-        )
+    def _set_activo(self, activo: bool):
+        self.setProperty("activo", "true" if activo else "false")
+        repolish(self)
 
-    def _set_estado_hover(self):
-        self.setStyleSheet(
-            self._ESTILO_BASE.format(bg="#e4f2f1", border="#01696f")
-        )
+    @staticmethod
+    def _rutas_validas(mime) -> list[str]:
+        return [
+            u.toLocalFile() for u in mime.urls()
+            if u.toLocalFile().lower().endswith(EXTENSIONES_IMG)
+        ]
 
     def dragEnterEvent(self, e: QDragEnterEvent):
-        if e.mimeData().hasUrls():
-            url = e.mimeData().urls()[0].toLocalFile()
-            if url.lower().endswith(
-                (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")
-            ):
-                e.acceptProposedAction()
-                self._set_estado_hover()
-                return
+        if e.mimeData().hasUrls() and self._rutas_validas(e.mimeData()):
+            e.acceptProposedAction()
+            self._set_activo(True)
+            return
         e.ignore()
 
     def dragLeaveEvent(self, e):
-        self._set_estado_normal()
+        self._set_activo(False)
 
     def dropEvent(self, e: QDropEvent):
-        self._set_estado_normal()
-        if e.mimeData().hasUrls():
-            ruta = e.mimeData().urls()[0].toLocalFile()
-            self.imagen_soltada.emit(ruta)
+        self._set_activo(False)
+        rutas = self._rutas_validas(e.mimeData())
+        if rutas:
+            self.imagenes_soltadas.emit(sorted(rutas))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Fila de una página a firmar
+# ─────────────────────────────────────────────────────────────────────────
+class FilaPagina(QFrame):
+    """Una página seleccionada, con su imagen, estado y acciones."""
+
+    digitalizar_pedido = pyqtSignal(int)
+    cargar_pedido      = pyqtSignal(int)
+    quitar_pedido      = pyqtSignal(int)
+    rotar_pedido       = pyqtSignal(int, int)   # (pagina, grados)
+
+    THUMB = (58, 76)
+
+    def __init__(self, pagina: int, ratio_pagina: float = 1.294, parent=None):
+        super().__init__(parent)
+        self.pagina = pagina
+        self.ratio_pagina = ratio_pagina
+        self._ruta: str | None = None
+
+        self.setObjectName("card")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
+        lay.setSpacing(SPACE["md"])
+
+        self.lbl_thumb = QLabel()
+        self.lbl_thumb.setObjectName("lienzoPagina")
+        self.lbl_thumb.setFixedSize(*self.THUMB)
+        self.lbl_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.lbl_thumb)
+
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(etiqueta(f"Página {pagina + 1}", rol="subtitulo"))
+        self.lbl_estado = etiqueta("Pendiente de escaneo", rol="hint")
+        col.addWidget(self.lbl_estado)
+        self.lbl_aviso = etiqueta("", rol="error", wrap=True)
+        self.lbl_aviso.hide()
+        col.addWidget(self.lbl_aviso)
+        col.addStretch()
+        lay.addLayout(col, 1)
+
+        # Etiquetas de texto en vez de glifos de flecha circular (⟲/⟳):
+        # esos caracteres no están en todas las fuentes y salían como
+        # cuadraditos vacíos. "−90°/+90°" se lee igual en cualquier equipo.
+        self.btn_rotar_izq = boton("-90°", variant="ghost", fixed_w=52,
+                                   height=SIZE["btn_sm"], compacto=True,
+                                   tooltip="Rotar 90° a la izquierda",
+                                   on_click=lambda: self.rotar_pedido.emit(self.pagina, -90))
+        self.btn_rotar_der = boton("+90°", variant="ghost", fixed_w=52,
+                                   height=SIZE["btn_sm"], compacto=True,
+                                   tooltip="Rotar 90° a la derecha",
+                                   on_click=lambda: self.rotar_pedido.emit(self.pagina, 90))
+        self.btn_quitar = boton("Quitar", variant="ghost",
+                                height=SIZE["btn_sm"], compacto=True,
+                                tooltip="Quitar la imagen de esta página",
+                                on_click=lambda: self.quitar_pedido.emit(self.pagina))
+        self.btn_digitalizar = boton("Digitalizar", variant="secondary",
+                                     height=SIZE["btn_sm"],
+                                     tooltip="Escanear la hoja firmada de esta página",
+                                     on_click=lambda: self.digitalizar_pedido.emit(self.pagina))
+        self.btn_cargar = boton("Cargar…", variant="ghost",
+                                height=SIZE["btn_sm"],
+                                tooltip="Elegir un archivo de imagen para esta página",
+                                on_click=lambda: self.cargar_pedido.emit(self.pagina))
+
+        for b in (self.btn_rotar_izq, self.btn_rotar_der, self.btn_quitar,
+                  self.btn_digitalizar, self.btn_cargar):
+            lay.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.actualizar(None, 0)
+
+    def actualizar(self, ruta: str | None, rotacion: int):
+        """Refresca miniatura, estado y qué botones tienen sentido."""
+        self._ruta = ruta
+        tiene = bool(ruta)
+
+        self.btn_rotar_izq.setVisible(tiene)
+        self.btn_rotar_der.setVisible(tiene)
+        self.btn_quitar.setVisible(tiene)
+        self.btn_digitalizar.setVisible(not tiene)
+        self.btn_cargar.setVisible(not tiene)
+
+        if not tiene:
+            self.lbl_thumb.clear()
+            self.lbl_estado.setText("Pendiente de escaneo")
+            self.lbl_estado.setProperty("rol", "hint")
+            repolish(self.lbl_estado)
+            self.lbl_aviso.hide()
+            self.setProperty("objectName", "card")
+            return
+
+        pm = QPixmap(ruta)
+        if not pm.isNull():
+            if rotacion:
+                pm = pm.transformed(QTransform().rotate(rotacion),
+                                    Qt.TransformationMode.SmoothTransformation)
+            self.lbl_thumb.setPixmap(pm.scaled(
+                *self.THUMB, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+            self._evaluar_orientacion(pm)
+
+        nombre = os.path.basename(ruta)
+        sufijo = f"  ·  rotada {rotacion}°" if rotacion else ""
+        self.lbl_estado.setText(f"✔  {nombre}{sufijo}")
+        self.lbl_estado.setProperty("rol", "ok")
+        repolish(self.lbl_estado)
+
+    def _evaluar_orientacion(self, pm: QPixmap):
+        """Avisa si la imagen y la página tienen orientaciones opuestas.
+
+        No bloquea nada: es casi siempre un escaneo al revés, y con un
+        clic en ⟳ se arregla.
+        """
+        if pm.width() <= 0:
+            self.lbl_aviso.hide()
+            return
+        ratio_img = pm.height() / pm.width()
+        img_vertical = ratio_img >= 1
+        pag_vertical = self.ratio_pagina >= 1
+        if img_vertical != pag_vertical:
+            self.lbl_aviso.setText(
+                "⚠  La orientación no coincide con la página — probá rotarla.")
+            self.lbl_aviso.show()
+        else:
+            self.lbl_aviso.hide()
+
+    def marcar_escaneando(self, activo: bool):
+        self.btn_digitalizar.setEnabled(not activo)
+        self.btn_cargar.setEnabled(not activo)
+        if activo:
+            self.lbl_estado.setText("Escaneando…")
+            self.lbl_estado.setProperty("rol", "ok")
+            repolish(self.lbl_estado)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -168,421 +332,322 @@ class ZonaDrop(QFrame):
 class VistaEscaneo(QWidget):
     """
     Señales:
-      imagen_lista(str)  → ruta de la imagen para reemplazar la página
-      cancelar()         → volver al grid de páginas
+      completado()  → todas las páginas tienen imagen y el usuario confirmó
+      cancelar()    → volver al grid de páginas
     """
-    imagen_lista = pyqtSignal(str)
-    cancelar     = pyqtSignal()
 
-    def __init__(self, ruta_pdf: str, num_pagina: int, parent=None):
+    completado = pyqtSignal()
+    cancelar   = pyqtSignal()
+
+    def __init__(self, trabajo: TrabajoFirma, parent=None):
         super().__init__(parent)
-        self.ruta_pdf    = ruta_pdf
-        self.num_pagina  = num_pagina
-        self._ruta_img   = None
-        self._worker     = None
-        self._imagen_entregada = False
-        self._construir_ui()
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setObjectName("pantalla")
+        self.setMinimumSize(560, 480)
 
+        self.trabajo = trabajo
+        self._filas: dict[int, FilaPagina] = {}
+        self._worker: WIAScanWorker | None = None
+        self._pagina_en_escaneo: int | None = None
+        self._temporales: list[str] = []      # sólo los creados por esta vista
+        self._entregado = False
+
+        self._ratios = self._leer_ratios_paginas()
+        self._construir_ui()
+        self._refrescar()
+        theme_signals.changed.connect(self._on_tema_cambiado)
+
+    def _leer_ratios_paginas(self) -> dict[int, float]:
+        """Proporción alto/ancho de cada página, para detectar escaneos
+        con la orientación cambiada."""
+        ratios: dict[int, float] = {}
+        try:
+            import fitz
+            with fitz.open(str(self.trabajo.ruta_pdf)) as doc:
+                for p in self.trabajo.paginas:
+                    if 0 <= p < doc.page_count:
+                        r = doc[p].rect
+                        if r.width:
+                            ratios[p] = r.height / r.width
+        except Exception:
+            pass
+        return ratios
+
+    # ── Construcción ───────────────────────────────────────────────────
     def _construir_ui(self):
         raiz = QVBoxLayout(self)
         raiz.setContentsMargins(0, 0, 0, 0)
         raiz.setSpacing(0)
 
-        # Cabecera
-        cab = QFrame()
-        cab.setFixedHeight(64)
-        cab.setStyleSheet("""
-            QFrame {
-                background: #f3f0ec;
-                border-bottom: 1px solid rgba(40,37,29,0.10);
-            }
-        """)
-        lay_cab = QHBoxLayout(cab)
-        lay_cab.setContentsMargins(20, 0, 20, 0)
+        nombre = os.path.basename(str(self.trabajo.ruta_pdf))
+        cantidad = self.trabajo.cantidad
+        plural = "s" if cantidad != 1 else ""
+        self.cabecera = BarraSuperior(
+            f"Escanear  ·  {cantidad} página{plural} "
+            f"({self.trabajo.etiqueta_paginas()})  ·  {nombre}")
+        self.cabecera.agregar(boton("←  Volver a páginas", variant="ghost",
+                                    tooltip="Volver al listado de páginas (Esc)",
+                                    on_click=self.cancelar.emit))
+        raiz.addWidget(self.cabecera)
 
-        nombre = os.path.basename(self.ruta_pdf)
-        lbl_titulo = QLabel(
-            f"Escanear  ·  Página {self.num_pagina + 1}  ·  {nombre}"
-        )
-        font_cab = QFont("Segoe UI", 13)
-        font_cab.setWeight(QFont.Weight.Medium)
-        lbl_titulo.setFont(font_cab)
-        lbl_titulo.setStyleSheet("color: #28251d;")
-        lay_cab.addWidget(lbl_titulo)
-        lay_cab.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        )
+        cuerpo = AreaScroll(margenes=(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["lg"]),
+                            spacing=SPACE["md"])
+        lay = cuerpo.lay
 
-        btn_volver = QPushButton("← Volver a páginas")
-        btn_volver.setFixedHeight(36)
-        btn_volver.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #7a7974;
-                border: 1px solid rgba(40,37,29,0.22);
-                border-radius: 6px;
-                padding: 0 16px;
-                font-size: 13px;
-            }
-            QPushButton:hover { color: #28251d; border-color: rgba(40,37,29,0.45); }
-        """)
-        btn_volver.clicked.connect(self.cancelar)
-        lay_cab.addWidget(btn_volver)
-        raiz.addWidget(cab)
+        lay.addWidget(etiqueta(
+            f"Se imprimieron las páginas {self.trabajo.etiqueta_paginas()}. "
+            "Firmá cada hoja y digitalizala, o cargá las imágenes desde el disco. "
+            "Podés hacerlo en cualquier orden.",
+            rol="cuerpo", wrap=True))
 
-        # Contenido
-        cuerpo = QWidget()
-        cuerpo.setStyleSheet("background: #f7f6f2;")
-        lay_cuerpo = QVBoxLayout(cuerpo)
-        lay_cuerpo.setContentsMargins(40, 28, 40, 28)
-        lay_cuerpo.setSpacing(20)
+        lay.addWidget(etiqueta(
+            f"💡  El escaneo WIA se hace en color a {WIAScanWorker.DPI_SCAN} DPI "
+            "(máxima calidad). Podés ajustarlo en el diálogo del escáner.",
+            rol="badge", wrap=True))
 
-        lbl_desc = QLabel(
-            f"La página {self.num_pagina + 1} fue enviada a la impresora. "
-            "Cuando tengas la hoja firmada, escanéala con el botón de abajo "
-            "o carga la imagen manualmente."
-        )
-        lbl_desc.setWordWrap(True)
-        lbl_desc.setStyleSheet("color: #7a7974; font-size: 13px;")
-        lay_cuerpo.addWidget(lbl_desc)
-
-        # Hint de resolución
-        lbl_dpi_hint = QLabel(
-            f"💡 El escaneo WIA se realiza en color a {WIAScanWorker.DPI_SCAN} DPI "
-            "(máxima calidad). Podés ajustarlo en el diálogo del escáner."
-        )
-        lbl_dpi_hint.setWordWrap(True)
-        lbl_dpi_hint.setStyleSheet(
-            "color: #01696f; font-size: 11px; "
-            "background: #cedcd8; border-radius: 6px; padding: 6px 10px;"
-        )
-        lay_cuerpo.addWidget(lbl_dpi_hint)
-
-        fila = QHBoxLayout()
-        fila.setSpacing(16)
-        fila.addWidget(self._panel_wia())
-        fila.addWidget(self._separador_o())
-        fila.addWidget(self._panel_manual())
-        lay_cuerpo.addLayout(fila)
-        lay_cuerpo.addWidget(self._panel_preview())
-
-        raiz.addWidget(cuerpo, 1)
-        raiz.addWidget(self._barra_inferior())
-
-    def _panel_wia(self) -> QFrame:
-        panel = QFrame()
-        panel.setStyleSheet("""
-            QFrame {
-                background: #f9f8f5;
-                border: 1px solid rgba(40,37,29,0.10);
-                border-radius: 10px;
-            }
-        """)
-        lay = QVBoxLayout(panel)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(10)
-
-        font_h = QFont("Segoe UI", 12)
-        font_h.setWeight(QFont.Weight.Medium)
-
-        t = QLabel("Digitalizar con el escáner")
-        t.setFont(font_h)
-        t.setStyleSheet("color: #28251d;")
-        lay.addWidget(t)
-
-        d = QLabel(
-            f"Usa el escáner conectado vía WIA.\n"
-            f"Resolución: {WIAScanWorker.DPI_SCAN} DPI color (PNG sin pérdida).\n"
-            "Abre el diálogo de 'Nueva digitalización'."
-        )
-        d.setWordWrap(True)
-        d.setStyleSheet("color: #7a7974; font-size: 12px;")
-        lay.addWidget(d)
-
-        lay.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        )
-
-        self.btn_digitalizar = QPushButton("Digitalizar")
-        self.btn_digitalizar.setFixedHeight(42)
-        self.btn_digitalizar.setStyleSheet("""
-            QPushButton {
-                background: #01696f;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-size: 14px;
-                font-weight: 700;
-                letter-spacing: 0.3px;
-            }
-            QPushButton:hover   { background: #0c4e54; }
-            QPushButton:pressed { background: #0f3638; }
-            QPushButton:disabled { background: #dcd9d5; color: #bab9b4; }
-        """)
-        self.btn_digitalizar.clicked.connect(self._on_digitalizar)
-        lay.addWidget(self.btn_digitalizar)
-
-        self.lbl_wia_estado = QLabel("")
-        self.lbl_wia_estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_wia_estado.setStyleSheet("color: #7a7974; font-size: 11px;")
-        self.lbl_wia_estado.hide()
-        lay.addWidget(self.lbl_wia_estado)
-
-        return panel
-
-    def _separador_o(self) -> QLabel:
-        lbl = QLabel("o")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setFixedWidth(28)
-        lbl.setStyleSheet("color: #bab9b4; font-size: 13px;")
-        return lbl
-
-    def _panel_manual(self) -> QFrame:
-        panel = QFrame()
-        panel.setStyleSheet("""
-            QFrame {
-                background: #f9f8f5;
-                border: 1px solid rgba(40,37,29,0.10);
-                border-radius: 10px;
-            }
-        """)
-        lay = QVBoxLayout(panel)
-        lay.setContentsMargins(20, 20, 20, 20)
-        lay.setSpacing(10)
-
-        font_h = QFont("Segoe UI", 12)
-        font_h.setWeight(QFont.Weight.Medium)
-
-        t = QLabel("Cargar imagen manualmente")
-        t.setFont(font_h)
-        t.setStyleSheet("color: #28251d;")
-        lay.addWidget(t)
-
-        d = QLabel("Arrastra una imagen a la zona de abajo,\no examina tus carpetas.")
-        d.setWordWrap(True)
-        d.setStyleSheet("color: #7a7974; font-size: 12px;")
-        lay.addWidget(d)
+        # Acciones globales
+        acciones = FilaAdaptable(breakpoint_px=560, spacing=SPACE["sm"])
+        self.btn_siguiente = boton("Digitalizar siguiente pendiente",
+                                   min_w=230,
+                                   tooltip="Escanea la próxima página sin imagen",
+                                   on_click=self._digitalizar_siguiente)
+        acciones.agregar(self.btn_siguiente)
+        acciones.agregar(boton("Cargar imágenes…", variant="secondary",
+                               tooltip="Elegí uno o varios archivos; se reparten "
+                                       "entre las páginas pendientes",
+                               on_click=self._cargar_varias))
+        acciones.agregar_stretch()
+        lay.addWidget(acciones)
 
         self.zona_drop = ZonaDrop()
-        self.zona_drop.imagen_soltada.connect(self._on_imagen_recibida)
+        self.zona_drop.imagenes_soltadas.connect(self._repartir_imagenes)
         lay.addWidget(self.zona_drop)
 
-        btn_examinar = QPushButton("Examinar archivos…")
-        btn_examinar.setFixedHeight(36)
-        btn_examinar.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #01696f;
-                border: 1px solid rgba(1,105,111,0.50);
-                border-radius: 6px;
-                font-size: 13px;
-                font-weight: 500;
-            }
-            QPushButton:hover {
-                background: #01696f;
-                color: white;
-                border-color: #01696f;
-            }
-        """)
-        btn_examinar.clicked.connect(self._on_examinar)
-        lay.addWidget(btn_examinar)
+        # Filas por página
+        contenedor_filas, self._lay_filas = tarjeta(padding=0, spacing=SPACE["sm"])
+        contenedor_filas.setObjectName("")   # sin fondo propio: son tarjetas sueltas
+        for p in self.trabajo.paginas:
+            fila = FilaPagina(p, self._ratios.get(p, 1.294))
+            fila.digitalizar_pedido.connect(self._digitalizar_pagina)
+            fila.cargar_pedido.connect(self._cargar_para_pagina)
+            fila.quitar_pedido.connect(self._quitar_imagen)
+            fila.rotar_pedido.connect(self._rotar)
+            self._filas[p] = fila
+            self._lay_filas.addWidget(fila)
+        lay.addWidget(contenedor_filas)
+        lay.addStretch()
+        raiz.addWidget(cuerpo, 1)
 
-        return panel
+        self.pie = BarraInferior("")
+        self.btn_usar = boton("Continuar  →", height=SIZE["btn_lg"],
+                              enabled=False, on_click=self._on_continuar)
+        self.pie.agregar(self.btn_usar)
+        raiz.addWidget(self.pie)
 
-    def _panel_preview(self) -> QFrame:
-        self.panel_preview = QFrame()
-        self.panel_preview.setStyleSheet("""
-            QFrame {
-                background: #f9f8f5;
-                border: 1px solid rgba(1,105,111,0.30);
-                border-radius: 10px;
-            }
-        """)
-        lay = QHBoxLayout(self.panel_preview)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(16)
+    # ── Estado ─────────────────────────────────────────────────────────
+    def _refrescar(self):
+        for p, fila in self._filas.items():
+            fila.actualizar(self.trabajo.imagenes.get(p), self.trabajo.rotacion(p))
 
-        self.lbl_prev_img = QLabel()
-        self.lbl_prev_img.setFixedSize(90, 118)
-        self.lbl_prev_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_prev_img.setStyleSheet("background: #edeae5; border-radius: 4px;")
-        lay.addWidget(self.lbl_prev_img)
+        completo = self.trabajo.completo
+        self.btn_usar.setEnabled(completo)
+        pendientes = self.trabajo.paginas_pendientes()
+        self.btn_siguiente.setEnabled(bool(pendientes))
 
-        info = QVBoxLayout()
-        self.lbl_prev_nombre = QLabel("—")
-        font_n = QFont("Segoe UI", 12)
-        font_n.setWeight(QFont.Weight.Medium)
-        self.lbl_prev_nombre.setFont(font_n)
-        self.lbl_prev_nombre.setStyleSheet("color: #28251d;")
-        info.addWidget(self.lbl_prev_nombre)
+        if completo:
+            self.pie.set_estado(
+                f"✔  {self.trabajo.descripcion_progreso()}", rol="ok")
+        else:
+            from modules.trabajo import formatear_paginas
+            self.pie.set_estado(
+                f"{self.trabajo.descripcion_progreso()}  ·  "
+                f"faltan: {formatear_paginas(pendientes)}")
 
-        self.lbl_prev_ruta = QLabel("")
-        self.lbl_prev_ruta.setStyleSheet("color: #7a7974; font-size: 11px;")
-        self.lbl_prev_ruta.setWordWrap(True)
-        info.addWidget(self.lbl_prev_ruta)
-
-        info.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        )
-        lay.addLayout(info)
-        lay.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        )
-
-        btn_cambiar = QPushButton("Cambiar imagen")
-        btn_cambiar.setFixedHeight(32)
-        btn_cambiar.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #7a7974;
-                border: 1px solid rgba(40,37,29,0.20);
-                border-radius: 5px;
-                padding: 0 12px;
-                font-size: 12px;
-            }
-            QPushButton:hover { color: #28251d; border-color: rgba(40,37,29,0.45); }
-        """)
-        btn_cambiar.clicked.connect(self._on_cambiar_imagen)
-        lay.addWidget(btn_cambiar)
-
-        self.panel_preview.hide()
-        return self.panel_preview
-
-    def _barra_inferior(self) -> QFrame:
-        barra = QFrame()
-        barra.setFixedHeight(64)
-        barra.setStyleSheet("""
-            QFrame {
-                background: #f9f8f5;
-                border-top: 1px solid rgba(40,37,29,0.10);
-            }
-        """)
-        lay = QHBoxLayout(barra)
-        lay.setContentsMargins(20, 0, 20, 0)
-
-        self.lbl_estado_inf = QLabel("Esperando imagen…")
-        self.lbl_estado_inf.setStyleSheet("color: #7a7974; font-size: 13px;")
-        lay.addWidget(self.lbl_estado_inf)
-        lay.addSpacerItem(
-            QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        )
-
-        self.btn_usar = QPushButton("Usar esta imagen  →")
-        self.btn_usar.setFixedHeight(40)
-        self.btn_usar.setEnabled(False)
-        self.btn_usar.setStyleSheet("""
-            QPushButton {
-                background: #01696f;
-                color: white;
-                border: none;
-                border-radius: 7px;
-                padding: 0 22px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton:hover   { background: #0c4e54; }
-            QPushButton:pressed { background: #0f3638; }
-            QPushButton:disabled { background: #dcd9d5; color: #bab9b4; }
-        """)
-        self.btn_usar.clicked.connect(self._on_usar_imagen)
-        lay.addWidget(self.btn_usar)
-
-        return barra
-
-    # ── Lógica WIA ─────────────────────────────────────────────────────
-    def _on_digitalizar(self):
-        try:
-            import win32com.client  # noqa: F401
-        except ImportError:
+    # ── Asignación de imágenes ─────────────────────────────────────────
+    def _validar_imagen(self, ruta: str) -> bool:
+        if not ruta or not Path(ruta).exists():
+            QMessageBox.warning(self, "Imagen no encontrada",
+                                f"No se pudo leer:\n{ruta}")
+            return False
+        if QPixmap(ruta).isNull():
             QMessageBox.warning(
-                self, "Dependencia faltante",
-                "pywin32 no está instalado.\n\nEjecuta:\n"
-                "  pip install pywin32\n\nLuego reinicia la aplicación."
-            )
+                self, "Formato no soportado",
+                f"No se pudo interpretar la imagen:\n{os.path.basename(ruta)}")
+            return False
+        return True
+
+    def _asignar(self, pagina: int, ruta: str) -> bool:
+        if not self._validar_imagen(ruta):
+            return False
+        try:
+            self.trabajo.asignar_imagen(pagina, ruta)
+        except ValueError as e:
+            QMessageBox.warning(self, "Página inválida", str(e))
+            return False
+        self._refrescar()
+        return True
+
+    def _repartir_imagenes(self, rutas: list[str]):
+        """Asigna una lista de archivos a las páginas pendientes, en orden."""
+        pendientes = self.trabajo.paginas_pendientes()
+        if not pendientes:
+            QMessageBox.information(
+                self, "Sin páginas pendientes",
+                "Todas las páginas ya tienen imagen.\n\n"
+                "Quitá alguna si querés reemplazarla.")
             return
 
-        self.btn_digitalizar.setEnabled(False)
-        self.btn_digitalizar.setText("Escaneando…")
-        self.lbl_wia_estado.setText("Abriendo diálogo WIA…")
-        self.lbl_wia_estado.show()
+        asignadas = 0
+        for ruta, pagina in zip(rutas, pendientes):
+            if self._asignar(pagina, ruta):
+                asignadas += 1
 
-        self._worker = WIAScanWorker()
-        self._worker.scan_completado.connect(self._on_imagen_recibida)
-        self._worker.scan_cancelado.connect(self._restablecer_btn_wia)
-        self._worker.scan_error.connect(self._on_wia_error)
-        self._worker.start()
+        sobrantes = len(rutas) - len(pendientes)
+        if sobrantes > 0:
+            QMessageBox.information(
+                self, "Sobraron imágenes",
+                f"Se asignaron {asignadas} imagen(es) a las páginas pendientes.\n"
+                f"Quedaron {sobrantes} sin usar: sólo había {len(pendientes)} "
+                "página(s) esperando.")
 
-    def _restablecer_btn_wia(self):
-        self.btn_digitalizar.setEnabled(True)
-        self.btn_digitalizar.setText("Digitalizar")
-        self.lbl_wia_estado.hide()
+    def _cargar_varias(self):
+        rutas, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar imágenes escaneadas",
+            os.path.expanduser("~"), FILTRO_IMG)
+        if rutas:
+            self._repartir_imagenes(sorted(rutas))
 
-    def _on_wia_error(self, msg: str):
-        self._restablecer_btn_wia()
-        QMessageBox.warning(
-            self, "Error al digitalizar",
-            f"El escáner reportó un error:\n\n{msg}\n\n"
-            "Verificá que el escáner esté conectado y encendido."
-        )
-
-    # ── Lógica manual ───────────────────────────────────────────────────
-    def _on_examinar(self):
+    def _cargar_para_pagina(self, pagina: int):
         ruta, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar imagen escaneada",
-            os.path.expanduser("~"),
-            "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp)"
-        )
+            self, f"Imagen para la página {pagina + 1}",
+            os.path.expanduser("~"), FILTRO_IMG)
         if ruta:
-            self._on_imagen_recibida(ruta)
+            self._asignar(pagina, ruta)
 
-    # ── Imagen recibida (cualquier fuente) ──────────────────────────────
-    def _on_imagen_recibida(self, ruta: str):
-        self._ruta_img = ruta
-        self._restablecer_btn_wia()
+    def _quitar_imagen(self, pagina: int):
+        self.trabajo.quitar_imagen(pagina)
+        self._refrescar()
 
-        pm = QPixmap(ruta)
-        if not pm.isNull():
-            self.lbl_prev_img.setPixmap(
-                pm.scaled(
-                    90, 118,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+    def _rotar(self, pagina: int, grados: int):
+        try:
+            self.trabajo.rotar(pagina, grados)
+        except ValueError as e:
+            QMessageBox.warning(self, "No se puede rotar", str(e))
+            return
+        self._refrescar()
 
-        nombre = os.path.basename(ruta)
-        self.lbl_prev_nombre.setText(nombre)
-        self.lbl_prev_ruta.setText(ruta)
-        self.panel_preview.show()
-        self.btn_usar.setEnabled(True)
-        self.lbl_estado_inf.setText(f"Lista: {nombre}")
-        self.lbl_estado_inf.setStyleSheet(
-            "color: #01696f; font-size: 13px; font-weight: 600;"
-        )
+    # ── Escaneo WIA ────────────────────────────────────────────────────
+    def _digitalizar_siguiente(self):
+        pagina = self.trabajo.siguiente_pendiente()
+        if pagina is None:
+            return
+        self._digitalizar_pagina(pagina)
 
-    def _on_cambiar_imagen(self):
-        self._ruta_img = None
-        self._imagen_entregada = False
-        self.lbl_prev_img.clear()
-        self.panel_preview.hide()
-        self.btn_usar.setEnabled(False)
-        self.lbl_estado_inf.setText("Esperando imagen…")
-        self.lbl_estado_inf.setStyleSheet("color: #7a7974; font-size: 13px;")
+    def _digitalizar_pagina(self, pagina: int):
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(
+                self, "Escaneo en curso",
+                "Ya hay un escaneo abierto. Terminalo o cancelalo antes de "
+                "empezar otro.")
+            return
 
-    def _on_usar_imagen(self):
-        if self._ruta_img:
-            self._imagen_entregada = True
-            self.imagen_lista.emit(self._ruta_img)
+        # Un solo chequeo cubre "no es Windows", "falta pywin32" y "no hay
+        # escáner conectado", cada uno con su mensaje y su sugerencia.
+        try:
+            verificar_escaneo_disponible()
+        except ErrorDispositivo as e:
+            QMessageBox.warning(self, "No se puede escanear", e.texto_completo())
+            return
+
+        # Con más de un escáner instalado, dejamos que elija: antes se
+        # usaba siempre el predeterminado de Windows, sin decir cuál era.
+        elegir = len(listar_escaneres()) > 1
+
+        self._pagina_en_escaneo = pagina
+        fila = self._filas.get(pagina)
+        if fila:
+            fila.marcar_escaneando(True)
+        self.btn_siguiente.setEnabled(False)
+        self.pie.set_estado(f"Escaneando la página {pagina + 1}…", rol="ok")
+
+        worker = WIAScanWorker(elegir_dispositivo=elegir)
+        self._worker = worker
+        _WORKERS_VIVOS.add(worker)
+        worker.finished.connect(lambda: _WORKERS_VIVOS.discard(worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.scan_completado.connect(self._on_scan_completado)
+        worker.scan_cancelado.connect(self._on_scan_cancelado)
+        worker.scan_error.connect(self._on_wia_error)
+        worker.start()
+
+    def _on_scan_completado(self, ruta: str):
+        self._temporales.append(ruta)
+        pagina = self._pagina_en_escaneo
+        self._pagina_en_escaneo = None
+        if pagina is None:
+            return
+        self._asignar(pagina, ruta)
+
+        # Salta sola a la próxima pendiente: el usuario ya está frente al
+        # escáner con la siguiente hoja en la mano.
+        siguiente = self.trabajo.siguiente_pendiente(pagina)
+        if siguiente is not None:
+            self.pie.set_estado(
+                f"Página {pagina + 1} lista. Siguiente pendiente: "
+                f"página {siguiente + 1}.", rol="ok")
+            fila = self._filas.get(siguiente)
+            if fila:
+                fila.btn_digitalizar.setFocus()
+        self._refrescar()
+
+    def _on_scan_cancelado(self):
+        pagina = self._pagina_en_escaneo
+        self._pagina_en_escaneo = None
+        if pagina is not None and pagina in self._filas:
+            self._filas[pagina].marcar_escaneando(False)
+        self._refrescar()
+
+    def _on_wia_error(self, error):
+        """Muestra el error ya traducido por la capa de dispositivos."""
+        self._on_scan_cancelado()
+        texto = (error.texto_completo() if isinstance(error, ErrorDispositivo)
+                 else str(error))
+        log.warning("Error de escaneo: %s", texto)
+        QMessageBox.warning(self, "Error al digitalizar", texto)
+
+    # ── Salida ─────────────────────────────────────────────────────────
+    def _on_continuar(self):
+        if not self.trabajo.completo:
+            return
+        self._entregado = True
+        self.completado.emit()
+
+    def _on_tema_cambiado(self, _modo: str):
+        self._refrescar()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelar.emit()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
+                and self.btn_usar.isEnabled():
+            self._on_continuar()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        if self._worker and self._worker.isRunning():
-            self._worker.wait()
-        if not self._imagen_entregada:
-            for f in glob.glob(
-                os.path.join(tempfile.gettempdir(), "pdf_sign_scan_*.png")
-            ):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+        # No esperamos al worker: el diálogo WIA es modal del sistema y
+        # bloquearía la app entera. El thread se limpia solo (_WORKERS_VIVOS).
+        try:
+            theme_signals.changed.disconnect(self._on_tema_cambiado)
+        except (TypeError, RuntimeError):
+            pass
+        if not self._entregado:
+            en_uso = set(self.trabajo.imagenes.values())
+            for f in self._temporales:
+                if f not in en_uso:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
         super().closeEvent(event)

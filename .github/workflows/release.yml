@@ -1,0 +1,159 @@
+name: Release
+
+# Publica una versión nueva en GitHub Releases.
+#
+# Uso:
+#   1. Subir el número en modules/version.py y commitear
+#   2. git tag v0.7.0 && git push origin v0.7.0
+#
+# El workflow compila el .exe en un Windows limpio, arma el instalador y
+# sube ambos artefactos al Release. Compilar en CI (y no a mano) evita el
+# clásico "en mi máquina andaba": el runner no tiene nada instalado de más.
+#
+# También se puede disparar a mano desde la pestaña Actions para probar el
+# build sin publicar nada.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # necesario para crear el Release
+
+jobs:
+  build-windows:
+    name: Compilar para Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Tests
+        run: pytest tests/ -q
+
+      - name: Leer la versión del proyecto
+        id: version
+        shell: bash
+        run: echo "version=$(python -m modules.version)" >> "$GITHUB_OUTPUT"
+
+      # Si el tag y modules/version.py no coinciden, el Release quedaría
+      # etiquetado con un número y la app mostrando otro.
+      - name: Verificar que el tag coincida con la versión
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proyecto="${{ steps.version.outputs.version }}"
+          if [ "$tag" != "$proyecto" ]; then
+            echo "::error::El tag es v$tag pero modules/version.py dice $proyecto."
+            echo "Actualizá modules/version.py o recreá el tag."
+            exit 1
+          fi
+          echo "Tag y versión coinciden: $proyecto"
+
+      - name: Compilar con PyInstaller
+        run: pyinstaller pdf_sign_assistant.spec --noconfirm
+
+      - name: Verificar que el ejecutable exista
+        shell: bash
+        run: |
+          exe="dist/PDF Sign Assistant/PDF Sign Assistant.exe"
+          test -f "$exe" || { echo "::error::No se generó $exe"; exit 1; }
+          echo "Ejecutable OK ($(du -h "$exe" | cut -f1))"
+
+      - name: Instalar Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Armar el instalador
+        run: |
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+            "installer\pdf_sign_assistant.iss" `
+            "/DAppVersion=${{ steps.version.outputs.version }}"
+
+      # ZIP portable: para quien no quiere o no puede instalar nada.
+      # El portable.txt hace que la app guarde todo junto al ejecutable.
+      - name: Armar el ZIP portable
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          $src = "dist\PDF Sign Assistant"
+          Set-Content -Path "$src\portable.txt" -Value @"
+          La presencia de este archivo activa el MODO PORTABLE:
+          la configuracion, los logs y los documentos firmados se guardan
+          junto a la aplicacion en vez de en las carpetas del usuario.
+
+          Borra este archivo si preferis el comportamiento normal.
+          "@
+          New-Item -ItemType Directory -Force -Path dist\installer | Out-Null
+          Compress-Archive -Path "$src\*" `
+            -DestinationPath "dist\installer\PDFSignAssistant-$ver-portable.zip" `
+            -CompressionLevel Optimal
+
+      - name: Calcular checksums
+        shell: pwsh
+        working-directory: dist/installer
+        run: |
+          Get-FileHash *.exe, *.zip -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Guardar artefactos del build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ steps.version.outputs.version }}
+          path: dist/installer/*
+          retention-days: 14
+
+      - name: Publicar el Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          notas="$(cat <<EOF
+          ## Descargar
+
+          | Archivo | Para quién |
+          |---------|-----------|
+          | \`PDFSignAssistant-$ver-Setup.exe\` | **La mayoría.** Instalador normal: no pide permisos de administrador y crea el acceso directo. |
+          | \`PDFSignAssistant-$ver-portable.zip\` | Sin instalar nada (por ejemplo, desde un pendrive). Descomprimir y ejecutar. |
+
+          ### La primera vez, Windows va a advertirte
+
+          La aplicación **no está firmada digitalmente**, así que SmartScreen muestra
+          *"Windows protegió su PC"*. Para continuar: **Más información → Ejecutar de todas formas**.
+
+          Podés verificar la integridad de la descarga con \`SHA256SUMS.txt\`.
+
+          ### Dónde quedan tus archivos
+
+          - Documentos firmados: \`Documentos\\PDF Sign Assistant\`
+          - Configuración y logs: \`%LOCALAPPDATA%\\PDF Sign Assistant\`
+
+          Al desinstalar, **tus documentos no se borran**.
+
+          ---
+
+          El detalle de los cambios está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/main/README.md#changelog).
+          EOF
+          )"
+          gh release create "$GITHUB_REF_NAME" \
+            dist/installer/*.exe \
+            dist/installer/*.zip \
+            dist/installer/SHA256SUMS.txt \
+            --title "PDF Sign Assistant $ver" \
+            --notes "$notas"

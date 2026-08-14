@@ -1,0 +1,41 @@
+name: CI
+
+# Corre en cada push y PR. Es rápido a propósito (no compila el .exe):
+# su trabajo es que nunca se publique un release con el árbol roto.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint y tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias de test
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest ruff
+
+      - name: Lint
+        run: ruff check --select F,E9,W291,W293 main.py modules/ tests/
+
+      # Los tests del modelo de dominio son lógica pura: no necesitan Qt
+      # ni pantalla, así que corren en el runner sin display virtual.
+      - name: Tests
+        run: pytest tests/ -q
+
+      - name: Verificar que la versión esté bien formada
+        run: python -m modules.version

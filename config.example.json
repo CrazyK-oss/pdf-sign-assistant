@@ -1,0 +1,7 @@
+{
+    "email_user": "tu_correo@dominio.com",
+    "email_password": "",
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "tema": "light"
+}
