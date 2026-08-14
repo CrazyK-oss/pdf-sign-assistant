@@ -27,7 +27,6 @@ from modules.dispositivos import (
     sanear_capacidades,
 )
 
-
 # ── Saneamiento de capacidades ────────────────────────────────────────────────
 
 def test_driver_normal_se_respeta():

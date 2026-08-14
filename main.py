@@ -85,7 +85,6 @@ from modules.setup import (
 )
 from modules.theme import SPACE, THEME, apply_theme, current_mode
 from modules.trabajo import TrabajoFirma
-from modules.version import APP_NOMBRE, __version__
 from modules.ui import (
     FilaAdaptable,
     abrir_en_sistema,
@@ -94,6 +93,7 @@ from modules.ui import (
     separador,
     tarjeta,
 )
+from modules.version import APP_NOMBRE, __version__
 
 setup_directories()
 log = logging.getLogger("psa.main")
@@ -525,7 +525,9 @@ class VentanaPrincipal(QMainWindow):
         automática, que sólo habla si hay algo que decir.
         """
         from modules.actualizador import (
-            REPO_DEFECTO, WorkerComprobar, marcar_comprobacion,
+            REPO_DEFECTO,
+            WorkerComprobar,
+            marcar_comprobacion,
         )
 
         if self._worker_update is not None and self._worker_update.isRunning():
@@ -550,7 +552,9 @@ class VentanaPrincipal(QMainWindow):
 
     def _on_resultado_update(self, info, manual: bool):
         from modules.actualizador import (
-            DialogoActualizacion, esta_ignorada, hay_version_nueva,
+            DialogoActualizacion,
+            esta_ignorada,
+            hay_version_nueva,
         )
 
         if info is None:

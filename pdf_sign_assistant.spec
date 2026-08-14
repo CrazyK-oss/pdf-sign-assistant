@@ -123,6 +123,7 @@ hiddenimports = [
     "win32print",
     "win32gui",
     "pywintypes",
+    "modules.actualizaciones",
     "modules.actualizador",
     "modules.dispositivos",
     "modules.fase1_preview",

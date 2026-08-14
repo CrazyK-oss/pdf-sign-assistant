@@ -29,11 +29,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest ruff
 
+      # Las reglas viven en pyproject.toml, no repetidas acá
       - name: Lint
-        run: ruff check --select F,E9,W291,W293 main.py modules/ tests/
+        run: ruff check .
 
-      # Los tests del modelo de dominio son lógica pura: no necesitan Qt
-      # ni pantalla, así que corren en el runner sin display virtual.
+      # Los tests son de lógica pura: no necesitan Qt ni pantalla, así que
+      # corren sin display virtual y sin instalar las dependencias de la app.
+      # pyproject.toml define pythonpath=["."] para que `pytest` (el
+      # ejecutable, no `python -m pytest`) encuentre el paquete `modules`.
       - name: Tests
         run: pytest tests/ -q
 
