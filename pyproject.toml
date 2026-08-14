@@ -1,0 +1,25 @@
+# Configuración de herramientas de desarrollo.
+# La app no se instala como paquete: PyInstaller empaqueta el árbol tal cual.
+
+[tool.pytest.ini_options]
+# Sin esto, `pytest tests/` no encuentra el paquete `modules`.
+#
+# pytest agrega al sys.path el primer directorio SIN __init__.py contando
+# desde el archivo de test, o sea `tests/` — no la raíz del proyecto.
+# `python -m pytest` sí agrega el directorio actual, y por eso el fallo no
+# aparecía al correrlo así en local pero sí en CI, que invoca `pytest`.
+# Declararlo acá lo deja funcionando con cualquiera de las dos formas.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+# F   errores reales (nombres sin definir, imports sin usar)
+# E9  errores de sintaxis y de runtime
+# W29 espacios en blanco al final de línea
+# I   orden de los imports
+select = ["F", "E9", "W291", "W293", "I"]

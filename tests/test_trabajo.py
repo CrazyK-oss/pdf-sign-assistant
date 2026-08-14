@@ -15,7 +15,6 @@ import pytest
 
 from modules.trabajo import TrabajoFirma, formatear_paginas, parsear_paginas
 
-
 # ── formatear_paginas ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("entrada,esperado", [

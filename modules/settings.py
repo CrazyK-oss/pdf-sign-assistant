@@ -36,7 +36,6 @@ from PyQt6.QtWidgets import (
 
 from modules.setup import guardar_config
 from modules.theme import SIZE, SPACE
-from modules.version import __version__
 from modules.ui import (
     AreaScroll,
     FilaAdaptable,
@@ -44,6 +43,7 @@ from modules.ui import (
     etiqueta,
     separador,
 )
+from modules.version import __version__
 
 SMTP_PRESETS = {
     "Gmail":             ("smtp.gmail.com",       587),

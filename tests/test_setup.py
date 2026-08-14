@@ -15,7 +15,6 @@ import pytest
 
 from modules import setup
 
-
 # ── Configuración ─────────────────────────────────────────────────────────────
 
 def test_cargar_config_inexistente_devuelve_defaults(tmp_path):
