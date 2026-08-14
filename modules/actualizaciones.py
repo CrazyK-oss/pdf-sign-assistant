@@ -252,6 +252,10 @@ def descargar_verificado(info: InfoActualizacion, *,
     carpeta.mkdir(parents=True, exist_ok=True)
     destino = carpeta / (info.nombre_instalador or "instalador.exe")
 
+    # Cada actualización deja un instalador de ~50 MB. Sin esto se
+    # acumulan en el temporal del usuario indefinidamente.
+    limpiar_descargas_previas(carpeta, conservar=destino.name)
+
     digest = hashlib.sha256()
     try:
         with _abrir(info.url_instalador, binario=True) as r:
@@ -319,6 +323,22 @@ def lanzar_instalador(ruta: str) -> bool:
     except OSError as e:
         log.error("No se pudo lanzar el instalador: %s", e)
         return False
+
+
+def limpiar_descargas_previas(carpeta: Path, *, conservar: str = "") -> int:
+    """Borra instaladores de descargas anteriores. Devuelve cuántos borró."""
+    borrados = 0
+    try:
+        for archivo in Path(carpeta).iterdir():
+            if archivo.is_file() and archivo.name != conservar:
+                try:
+                    archivo.unlink()
+                    borrados += 1
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return borrados
 
 
 def borrar(ruta) -> None:

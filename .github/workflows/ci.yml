@@ -17,9 +17,9 @@ jobs:
     name: Lint y tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -33,8 +33,10 @@ jobs:
       - name: Lint
         run: ruff check .
 
-      # Los tests son de lógica pura: no necesitan Qt ni pantalla, así que
-      # corren sin display virtual y sin instalar las dependencias de la app.
+      # Los tests de lógica no necesitan Qt ni pantalla, así que corren sin
+      # display virtual y sin instalar las dependencias de la app. Los de
+      # integración se saltean solos acá y corren en el job de Release,
+      # que sí instala requirements.txt.
       # pyproject.toml define pythonpath=["."] para que `pytest` (el
       # ejecutable, no `python -m pytest`) encuentre el paquete `modules`.
       - name: Tests

@@ -71,6 +71,7 @@ try:
 except Exception:
     pass
 
+from modules.errores import instalar as instalar_manejador_errores
 from modules.fase1_preview import VistaPrevisualizacion
 from modules.setup import (
     BASE_DIR,
@@ -925,6 +926,16 @@ def main():
     # El .exe se compila con console=False: sin log a archivo, cualquier
     # error en la máquina del usuario se perdía sin dejar rastro.
     archivo_log = configurar_logging()
+
+    # Sin esto, una excepción no atrapada mata la app en silencio: el .exe
+    # se compila con console=False y no hay dónde imprimir el traceback.
+    instalar_manejador_errores(
+        version=__version__,
+        ruta_log=archivo_log,
+        mostrar_dialogo=lambda msg: QMessageBox.critical(
+            None, "Error inesperado", msg),
+    )
+
     log.info("── %s v%s iniciado ──", APP_NOMBRE, __version__)
     log.info("Datos en %s", CONFIG_PATH.parent)
     log.info("Documentos firmados en %s", CARPETA_FIRMADO)
