@@ -33,6 +33,7 @@ Además
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import uuid
@@ -50,6 +51,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from modules.dispositivos import (
+    ErrorDispositivo,
+    adquirir_imagen,
+    com_inicializado,
+    es_cancelacion_usuario,
+    interpretar_error_wia,
+    listar_escaneres,
+    verificar_escaneo_disponible,
+)
 from modules.theme import SIZE, SPACE, repolish, theme_signals
 from modules.trabajo import TrabajoFirma
 from modules.ui import (
@@ -70,60 +80,60 @@ PREFIJO_TEMP = "pdf_sign_scan_"
 # se cierre: destruir un QThread en ejecución revienta el proceso.
 _WORKERS_VIVOS: set[QThread] = set()
 
+log = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Worker: lanza el diálogo WIA en hilo aparte
 # ─────────────────────────────────────────────────────────────────────────
 class WIAScanWorker(QThread):
+    """Abre el diálogo de digitalización de WIA en un hilo aparte.
+
+    Puntos delicados que resuelve:
+      * COM se inicializa EN ESTE HILO. pywin32 no lo hace solo, y sin
+        eso toda llamada falla con "CoInitialize has not been called".
+        El usuario veía un error genérico del escáner y salía a revisar
+        cables, cuando el problema era del código.
+      * Los com_error se traducen a mensajes con causa y sugerencia.
+      * Si hay más de un escáner, se le deja elegir.
+    """
+
     scan_completado = pyqtSignal(str)
     scan_cancelado  = pyqtSignal()
-    scan_error      = pyqtSignal(str)
+    scan_error      = pyqtSignal(object)    # ErrorDispositivo
 
     # DPI objetivo. 300 alcanza para documentos simples; 600 se recomienda
     # cuando hay sellos húmedos o firmas con detalle fino.
     DPI_SCAN = 600
 
+    def __init__(self, elegir_dispositivo: bool = False, parent=None):
+        super().__init__(parent)
+        self._elegir_dispositivo = elegir_dispositivo
+
     def run(self):
+        nombre = f"{PREFIJO_TEMP}{uuid.uuid4().hex[:8]}.png"
+        ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
         try:
-            import win32com.client
+            # COM se inicializa EN ESTE HILO: sin esto, toda llamada WIA
+            # falla con "CoInitialize has not been called".
+            with com_inicializado() as ok:
+                if not ok:
+                    raise ErrorDispositivo(
+                        "No se pudieron cargar los componentes de Windows "
+                        "para escanear.",
+                        sugerencia="Instalalos con:  pip install pywin32")
 
-            wia = win32com.client.Dispatch("WIA.CommonDialog")
+                adquirir_imagen(ruta_destino, dpi=self.DPI_SCAN,
+                                elegir_dispositivo=self._elegir_dispositivo)
+                self.scan_completado.emit(ruta_destino)
 
-            # ShowAcquireImage(
-            #   DeviceType:         1 = Scanner
-            #   Intent:             1 = Color
-            #   Bias:               4 = MaximumQuality
-            #   FormatID:           PNG sin pérdida
-            #   AlwaysSelectDevice: False (usa el escáner por defecto)
-            #   UseCommonUI:        True  (diálogo completo de WIA)
-            #   CancelError:        True  (excepción si el usuario cancela)
-            # )
-            img_wia = wia.ShowAcquireImage(
-                1, 1, 4,
-                "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}",  # PNG
-                False, True, True,
-            )
-
-            # Algunos escáneres exponen la resolución como propiedad WIA
-            # (6147 = horizontal, 6148 = vertical). Si el driver no la
-            # publica, el usuario ya pudo elegirla en el diálogo.
-            try:
-                img_wia.Properties("6147").Value = self.DPI_SCAN
-                img_wia.Properties("6148").Value = self.DPI_SCAN
-            except Exception:
-                pass
-
-            nombre = f"{PREFIJO_TEMP}{uuid.uuid4().hex[:8]}.png"
-            ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
-            img_wia.SaveFile(ruta_destino)
-            self.scan_completado.emit(ruta_destino)
-
+        except ErrorDispositivo as e:
+            self.scan_error.emit(e)
         except Exception as e:                       # noqa: BLE001
-            msg = str(e).lower()
-            if any(x in msg for x in ("cancel", "0x80210003", "user cancel")):
+            if es_cancelacion_usuario(e):
                 self.scan_cancelado.emit()
             else:
-                self.scan_error.emit(str(e))
+                self.scan_error.emit(interpretar_error_wia(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -541,14 +551,17 @@ class VistaEscaneo(QWidget):
                 "empezar otro.")
             return
 
+        # Un solo chequeo cubre "no es Windows", "falta pywin32" y "no hay
+        # escáner conectado", cada uno con su mensaje y su sugerencia.
         try:
-            import win32com.client  # noqa: F401
-        except ImportError:
-            QMessageBox.warning(
-                self, "Dependencia faltante",
-                "pywin32 no está instalado.\n\nEjecutá:\n"
-                "  pip install pywin32\n\nLuego reiniciá la aplicación.")
+            verificar_escaneo_disponible()
+        except ErrorDispositivo as e:
+            QMessageBox.warning(self, "No se puede escanear", e.texto_completo())
             return
+
+        # Con más de un escáner instalado, dejamos que elija: antes se
+        # usaba siempre el predeterminado de Windows, sin decir cuál era.
+        elegir = len(listar_escaneres()) > 1
 
         self._pagina_en_escaneo = pagina
         fila = self._filas.get(pagina)
@@ -557,7 +570,7 @@ class VistaEscaneo(QWidget):
         self.btn_siguiente.setEnabled(False)
         self.pie.set_estado(f"Escaneando la página {pagina + 1}…", rol="ok")
 
-        worker = WIAScanWorker()
+        worker = WIAScanWorker(elegir_dispositivo=elegir)
         self._worker = worker
         _WORKERS_VIVOS.add(worker)
         worker.finished.connect(lambda: _WORKERS_VIVOS.discard(worker))
@@ -594,12 +607,13 @@ class VistaEscaneo(QWidget):
             self._filas[pagina].marcar_escaneando(False)
         self._refrescar()
 
-    def _on_wia_error(self, msg: str):
+    def _on_wia_error(self, error):
+        """Muestra el error ya traducido por la capa de dispositivos."""
         self._on_scan_cancelado()
-        QMessageBox.warning(
-            self, "Error al digitalizar",
-            f"El escáner reportó un error:\n\n{msg}\n\n"
-            "Verificá que el escáner esté conectado y encendido.")
+        texto = (error.texto_completo() if isinstance(error, ErrorDispositivo)
+                 else str(error))
+        log.warning("Error de escaneo: %s", texto)
+        QMessageBox.warning(self, "Error al digitalizar", texto)
 
     # ── Salida ─────────────────────────────────────────────────────────
     def _on_continuar(self):

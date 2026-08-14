@@ -34,31 +34,29 @@ Optimizaciones
 from __future__ import annotations
 
 import ctypes
+import logging
 import struct
-import sys
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
 from PyQt6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 
+from modules.dispositivos import (
+    DPI_REINTENTOS,
+    ErrorDispositivo,
+    contexto_impresora,
+    leer_capacidades,
+    verificar_impresion_disponible,
+)
 from modules.trabajo import formatear_paginas
+
+log = logging.getLogger(__name__)
 
 try:
     import fitz
     PYMUPDF_OK = True
 except ImportError:
     PYMUPDF_OK = False
-
-try:
-    import win32con
-    import win32ui
-    WIN32_OK = True
-except ImportError:
-    WIN32_OK = False
-
-# DPI del render: usamos el DPI real del printer DC para resolución máxima,
-# pero lo capamos para evitar imágenes enormes en memoria.
-MAX_RENDER_DPI = 300
 
 # Constantes GDI
 _SRCCOPY        = 0x00CC0020
@@ -104,6 +102,7 @@ def _aplicar_stride(buf: bytearray, ancho: int, alto: int) -> tuple[bytes, int]:
 class _WorkerImpresion(QThread):
     progreso = pyqtSignal(int, str)
     error    = pyqtSignal(str)
+    aviso    = pyqtSignal(str)      # problemas no fatales, para el log/estado
 
     def __init__(self, ruta_pdf: str, paginas: list[int], printer_name: str):
         super().__init__()
@@ -114,83 +113,114 @@ class _WorkerImpresion(QThread):
         self.impresas = 0
 
     def run(self):
-        hdc = None
-        doc_abierto = False
+        total = len(self._paginas)
+        if not total:
+            self.error.emit("No hay páginas para imprimir.")
+            return
+
         try:
-            total = len(self._paginas)
-            if not total:
-                raise ValueError("No hay páginas para imprimir.")
-
-            # 1. Abrir el printer DC (una sola vez) y leer sus capacidades
             self.progreso.emit(2, "Conectando con la impresora…")
-            hdc = win32ui.CreateDC()
-            hdc.CreatePrinterDC(self._printer_name)
-            dpi_x = hdc.GetDeviceCaps(win32con.LOGPIXELSX)
-            dpi_y = hdc.GetDeviceCaps(win32con.LOGPIXELSY)
-            page_px_w = hdc.GetDeviceCaps(win32con.HORZRES)
-            page_px_h = hdc.GetDeviceCaps(win32con.VERTRES)
-            render_dpi = min(max(dpi_x, dpi_y), MAX_RENDER_DPI)
+            with contexto_impresora(self._printer_name) as hdc:
+                # Las capacidades pasan por el saneador: un driver que
+                # informa 0 DPI o 0 de área ya no rompe ni imprime en blanco.
+                caps = leer_capacidades(hdc)
+                if caps.fue_corregida:
+                    self.aviso.emit(" ".join(caps.correcciones))
 
-            gdi32 = ctypes.windll.gdi32          # type: ignore[attr-defined]
-            handle = hdc.GetHandleOutput()
-            gdi32.SetStretchBltMode(handle, _HALFTONE)
+                gdi32 = ctypes.windll.gdi32      # type: ignore[attr-defined]
+                handle = hdc.GetHandleOutput()
+                gdi32.SetStretchBltMode(handle, _HALFTONE)
 
-            # 2. Un único trabajo de impresión para todas las páginas
-            hdc.StartDoc("PDF Sign Assistant")
-            doc_abierto = True
-
-            with fitz.open(self._ruta_pdf) as doc:
-                for i, num_pagina in enumerate(self._paginas):
-                    base = int(i / total * 96)
-                    self.progreso.emit(
-                        base + 2,
-                        f"Renderizando página {num_pagina + 1} "
-                        f"({i + 1} de {total}) a {render_dpi} DPI…")
-
-                    pagina = doc[num_pagina]
-                    zoom = render_dpi / 72.0
-                    pix = pagina.get_pixmap(
-                        matrix=fitz.Matrix(zoom, zoom),
-                        colorspace=fitz.csRGB,
-                        alpha=False,
-                    )
-                    src_w, src_h = pix.width, pix.height
-                    muestras = pix.samples
-                    del pix          # libera el bitmap de fitz cuanto antes
-
-                    self.progreso.emit(
-                        base + 5, f"Preparando página {num_pagina + 1}…")
-                    datos, _stride = _aplicar_stride(
-                        _rgb_a_bgr(muestras), src_w, src_h)
-                    del muestras
-
-                    self.progreso.emit(
-                        base + 8,
-                        f"Enviando página {num_pagina + 1} a la impresora…")
-                    self._imprimir_pagina(hdc, gdi32, handle, datos,
-                                          src_w, src_h, page_px_w, page_px_h)
-                    del datos
-                    self.impresas += 1
-
-            hdc.EndDoc()
-            doc_abierto = False
+                # Un único trabajo de impresión para todas las páginas.
+                # El try/finally interno garantiza que un trabajo abierto
+                # se aborte: si queda a medias, traba la cola de impresión.
+                hdc.StartDoc("PDF Sign Assistant")
+                terminado = False
+                try:
+                    with fitz.open(self._ruta_pdf) as doc:
+                        for i, num_pagina in enumerate(self._paginas):
+                            self._imprimir_una(doc, hdc, gdi32, handle, caps,
+                                               num_pagina, i, total)
+                            self.impresas += 1
+                    hdc.EndDoc()
+                    terminado = True
+                finally:
+                    if not terminado:
+                        try:
+                            hdc.AbortDoc()
+                        except Exception:            # noqa: BLE001
+                            pass
 
             self.progreso.emit(100, "Listo")
             self.ok = True
+
+        except ErrorDispositivo as e:
+            self.error.emit(e.texto_completo())
         except Exception as e:                       # noqa: BLE001
             self.error.emit(str(e))
-        finally:
-            if hdc is not None:
-                if doc_abierto:
-                    # Un trabajo a medio abrir dejaría la cola trabada
-                    try:
-                        hdc.AbortDoc()
-                    except Exception:
-                        pass
-                try:
-                    hdc.DeleteDC()
-                except Exception:
-                    pass
+
+    def _imprimir_una(self, doc, hdc, gdi32, handle, caps,
+                      num_pagina: int, indice: int, total: int) -> None:
+        """Renderiza y envía una página, bajando el DPI si hace falta.
+
+        Algunas impresoras (sobre todo las de red y las económicas)
+        rechazan bitmaps grandes con un error genérico o se quedan sin
+        memoria. En vez de abortar el trabajo entero, se reintenta a
+        menor resolución: una hoja a 150 DPI es infinitamente mejor que
+        ninguna hoja.
+        """
+        base = int(indice / total * 96)
+        dpis = [caps.dpi] + [d for d in DPI_REINTENTOS if d < caps.dpi]
+        ultimo_error: Exception | None = None
+
+        for intento, dpi in enumerate(dpis):
+            try:
+                sufijo = "" if intento == 0 else f" (reintento a {dpi} DPI)"
+                self.progreso.emit(
+                    base + 2,
+                    f"Renderizando página {num_pagina + 1} "
+                    f"({indice + 1} de {total}) a {dpi} DPI{sufijo}…")
+
+                zoom = dpi / 72.0
+                pix = doc[num_pagina].get_pixmap(
+                    matrix=fitz.Matrix(zoom, zoom),
+                    colorspace=fitz.csRGB,
+                    alpha=False,
+                )
+                src_w, src_h = pix.width, pix.height
+                muestras = pix.samples
+                del pix              # libera el bitmap de fitz cuanto antes
+
+                if src_w <= 0 or src_h <= 0:
+                    raise ValueError(
+                        f"El render de la página {num_pagina + 1} salió vacío.")
+
+                self.progreso.emit(
+                    base + 5, f"Preparando página {num_pagina + 1}…")
+                datos, _stride = _aplicar_stride(
+                    _rgb_a_bgr(muestras), src_w, src_h)
+                del muestras
+
+                self.progreso.emit(
+                    base + 8,
+                    f"Enviando página {num_pagina + 1} a la impresora…")
+                self._imprimir_pagina(hdc, gdi32, handle, datos,
+                                      src_w, src_h, caps.ancho_px, caps.alto_px)
+                del datos
+                return
+
+            except (MemoryError, RuntimeError, ValueError) as e:
+                ultimo_error = e
+                log.warning("Página %d falló a %d DPI (%s)",
+                            num_pagina + 1, dpi, e)
+                if intento < len(dpis) - 1:
+                    self.aviso.emit(
+                        f"La impresora rechazó la página {num_pagina + 1} a "
+                        f"{dpi} DPI; se reintenta con menor resolución.")
+
+        raise RuntimeError(
+            f"No se pudo imprimir la página {num_pagina + 1} ni siquiera a "
+            f"{dpis[-1]} DPI.\n{ultimo_error}")
 
     @staticmethod
     def _imprimir_pagina(hdc, gdi32, handle, datos: bytes,
@@ -260,12 +290,13 @@ class ImpresionPagina:
                 "PyMuPDF no está instalado.\n\npip install pymupdf")
             return False
 
-        if sys.platform != "win32" or not WIN32_OK:
-            QMessageBox.critical(
-                parent, "Impresión no disponible",
-                "La impresión directa usa GDI de Windows (pywin32).\n\n"
-                "En Windows, instalá las dependencias con:\n"
-                "    pip install pywin32")
+        # Un único chequeo para "no hay Windows", "falta pywin32" y
+        # "no hay ninguna impresora instalada", cada uno con su mensaje.
+        try:
+            verificar_impresion_disponible()
+        except ErrorDispositivo as e:
+            QMessageBox.critical(parent, "Impresión no disponible",
+                                 e.texto_completo())
             return False
 
         etiqueta = formatear_paginas(paginas)
@@ -309,10 +340,14 @@ class ImpresionPagina:
 
         worker = _WorkerImpresion(ruta_pdf, paginas, printer_qt.printerName())
         errores: list[str] = []
+        avisos: list[str] = []
         worker.progreso.connect(
             lambda pct, txt: (progreso.setValue(min(100, pct)),
                               progreso.setLabelText(txt)))
         worker.error.connect(errores.append)
+        # Los avisos son problemas que no impidieron imprimir (driver que
+        # informa mal, reintento a menor DPI): van al log, no a un cartel.
+        worker.aviso.connect(lambda m: (avisos.append(m), log.warning(m)))
         worker.start()
 
         # Mantiene la UI viva sin anidar event loops propios.

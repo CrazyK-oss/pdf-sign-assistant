@@ -128,6 +128,7 @@ pdf-sign-assistant/
     ├── setup.py             # Rutas compatibles con PyInstaller + carga/guardado de config
     ├── theme.py             # Sistema de diseño: paletas, tokens (espaciado/radios/tipografía), stylesheet
     ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
+    ├── dispositivos.py      # Capa única de impresoras y escáneres: validación, COM y errores traducidos
     ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── version.py           # Única fuente de verdad de la versión (app, instalador y CI la leen de acá)
     ├── actualizador.py      # Actualizador interno: consulta, descarga verificada e instalación silenciosa
@@ -343,6 +344,24 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 
 ## Changelog
 
+### v0.10 — Blindaje frente a drivers *(actual)*
+
+**Capa única de dispositivos**
+- Nuevo `modules/dispositivos.py`: **ningún otro módulo importa `win32*`**. Impresión, escaneo, enumeración y traducción de errores pasan todos por ahí
+- Eso hace testeable lo que antes no lo era: el hardware no existe en CI, pero ahora se puede simular. **39 tests** nuevos, incluido un escáner falso que ejercita el flujo de adquisición completo
+
+**Dos bugs reales corregidos**
+- **COM nunca se inicializaba en el hilo del escáner.** `win32com.Dispatch` corría dentro de un `QThread` sin `CoInitialize()`: en Windows eso falla con *"CoInitialize has not been called"*, y el usuario recibía un "el escáner reportó un error" que lo mandaba a revisar cables cuando el problema era del código
+- **Un driver que informa `0` reventaba la impresión.** DPI en 0 → `ZeroDivisionError`; área imprimible en 0 → escala 0 → **hoja impresa en blanco sin ningún aviso**. Pasa con impresoras virtuales y drivers genéricos. Ahora todo lo que informa el driver pasa por un saneador con valores de respaldo, y las correcciones quedan en el log
+
+**Tolerancia a fallos**
+- **Reintento a menor DPI**: si la impresora rechaza un bitmap grande (típico en impresoras de red y económicas), se reintenta a 200 y 150 DPI en vez de abortar el trabajo entero. Una hoja a 150 DPI es mejor que ninguna hoja
+- El trabajo de impresión se **aborta correctamente** si algo falla a mitad de camino: uno abierto a medias traba la cola
+- Mensajes distintos para "no es Windows", "falta pywin32" y **"no hay ninguna impresora/escáner instalado"**, cada uno con su sugerencia concreta
+- Los errores de WIA se traducen: ocupado, sin papel, sin permisos, no está listo…
+- Si hay **más de un escáner**, se deja elegir cuál usar
+- Se verifica que el escáner haya devuelto un archivo real: antes, un escaneo vacío pasaba como éxito
+
 ### v0.9 — Actualizador interno *(actual)*
 
 - **La app se actualiza sola.** Consulta una vez por día si hay versión nueva, avisa con las notas del Release renderizadas, y si el usuario acepta: descarga el instalador, **verifica su SHA-256** contra el `SHA256SUMS.txt` publicado, y lo ejecuta en silencio. Inno Setup cierra la app, actualiza y la vuelve a abrir
@@ -487,6 +506,43 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 
 ---
 
+## Sobre los drivers
+
+**No se unifican drivers, y no se puede.** Los distribuye el fabricante y los
+instala Windows: una aplicación no puede empaquetarlos ni reemplazarlos. Lo que
+sí existe es la capa de unificación del propio sistema, y es la que usa esta
+app:
+
+| Dispositivo | API | Por qué |
+|-------------|-----|---------|
+| Impresora | **GDI** (`StretchDIBits` sobre el printer DC) | Escribe los píxeles directo, sin que ICM ni GDI+ toquen el color |
+| Escáner | **WIA** | Estándar de Windows; el fabricante provee el driver |
+
+Lo que sí se unifica es **nuestro lado**: todo el acceso a dispositivos pasa por
+`modules/dispositivos.py`. Ningún otro módulo importa `win32*`. Eso da un único
+lugar donde validar, traducir errores y, sobre todo, **testear** — el hardware no
+existe en CI, así que la lógica tiene que ser aislable.
+
+### Los drivers mienten
+
+La capa asume que un driver puede devolver cualquier cosa, y lo corrige:
+
+| Lo que informa el driver | Qué pasaba antes | Qué hace ahora |
+|--------------------------|------------------|----------------|
+| `0` DPI | `ZeroDivisionError` — la impresión reventaba | Usa 300 DPI y lo anota en el log |
+| `0` de área imprimible | Escala 0 → **hoja impresa en blanco, sin aviso** | Asume A4 y lo anota |
+| Valores absurdos (10⁶ DPI) | Bitmap gigante → sin memoria | Se acota a un rango razonable |
+| Rechaza un bitmap grande | Se abortaba todo el trabajo | Reintenta a 200 y 150 DPI |
+
+### ¿Y TWAIN?
+
+Sería el respaldo para escáneres viejos que no exponen WIA. **No está implementado
+a propósito:** el DSM de TWAIN arrastra un problema de 32 vs 64 bits que cuesta más
+de lo que resuelve. La puerta queda abierta —`dispositivos.py` es el único lugar a
+tocar— para cuando aparezca un escáner concreto que lo necesite.
+
+---
+
 ## Notas técnicas
 
 - Solo puede haber **un PDF en proceso** a la vez; el botón "Abrir PDF" se deshabilita hasta que la sesión actual se cierre o complete.
@@ -496,6 +552,9 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - Hacer doble clic en un documento guardado lo reabre para re-editar sin modificar el original.
 - Todos los errores se muestran como diálogos amigables; los tracebacks detallados se imprimen en consola para depuración.
 - La conversión imagen → PDF intenta tres motores en orden: **reportlab** → **img2pdf** (en subproceso aislado, porque puede crashear a nivel de extensión C) → **Pillow**.
+- **COM se inicializa en el hilo del escáner** (`CoInitialize`/`CoUninitialize` en STA). pywin32 no lo hace solo en hilos nuevos: sin eso, toda llamada a WIA falla con *"CoInitialize has not been called"*, y el usuario veía un error genérico que lo mandaba a revisar cables.
+- Los `com_error` de WIA se traducen a mensajes con causa y sugerencia. Un `0x80210006` crudo no le dice nada a nadie; "El escáner está ocupado" sí.
+- Si hay **más de un escáner** instalado, se muestra el selector de WIA. Antes se usaba siempre el predeterminado, sin decir cuál era.
 - El actualizador **verifica el SHA-256** del instalador descargado contra el `SHA256SUMS.txt` del Release antes de ejecutarlo. Eso protege la integridad de la descarga (corrupción, intercepción), pero no cubre un repositorio comprometido: para eso hace falta firma de código.
 - La actualización silenciosa es posible **porque el instalador no pide permisos de administrador**. Si instalara en `Program Files`, cada actualización dispararía un cartel de UAC.
 - La comprobación de actualizaciones se espacia 24 h y se hace 3 segundos después de abrir la app, para no retrasar el arranque. Falla en silencio si no hay internet o hay un proxy de por medio.
