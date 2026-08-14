@@ -129,6 +129,7 @@ pdf-sign-assistant/
     ├── theme.py             # Sistema de diseño: paletas, tokens (espaciado/radios/tipografía), stylesheet
     ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
     ├── dispositivos.py      # Capa única de impresoras y escáneres: validación, COM y errores traducidos
+    ├── errores.py           # Manejador global de excepciones: log + aviso al usuario
     ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── version.py           # Única fuente de verdad de la versión (app, instalador y CI la leen de acá)
     ├── actualizador.py      # Actualizador interno: consulta, descarga verificada e instalación silenciosa
@@ -343,6 +344,15 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 ---
 
 ## Changelog
+
+### v0.10.1 — Red de seguridad *(actual)*
+
+- **Manejador global de excepciones.** El `.exe` se compila con `console=False`: hasta ahora, una excepción que escapara mataba la aplicación **en silencio**, sin dejar rastro. Ahora queda en el log con traceback completo y el usuario ve un aviso que le dice qué pasó y dónde está el archivo para reportarlo. Cubre también los hilos, que tienen su propio hook desde Python 3.8
+- **Tests de integración del guardado.** El pipeline central —imagen escaneada → PDF → reemplazo dentro del documento— no tenía **ni un test** en el repo. Ahora hay 7 que abren el PDF resultante y verifican los píxeles: que cada imagen aterrice en su página, que las no elegidas queden intactas, que la rotación no deforme, y que los metadatos registren las páginas firmadas. Se saltean solos en el CI liviano y corren en el job de Release, que instala las dependencias completas
+- **El actualizador limpia lo que descarga.** Cada actualización dejaba un instalador de ~50 MB en el temporal del usuario, para siempre
+- Acciones de GitHub actualizadas a las versiones que corren sobre **Node 24** (el runtime Node 20 quedó deprecado)
+
+> Se revisó también el reemplazo de páginas con `/Rotate` (documentos escaneados con páginas giradas): el resultado es correcto —la firma queda vertical, como se escaneó— así que no hizo falta cambiar nada.
 
 ### v0.10 — Blindaje frente a drivers *(actual)*
 

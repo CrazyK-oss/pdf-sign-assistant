@@ -40,7 +40,12 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
+      # Acá sí corren los tests de integración: este job instala
+      # requirements.txt completo, así que tiene PyQt6, PyMuPDF y Pillow.
+      # En el CI liviano se saltean solos.
       - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen    # los de integración crean una QApplication
         run: pytest tests/ -q
 
       - name: Leer la versión del proyecto

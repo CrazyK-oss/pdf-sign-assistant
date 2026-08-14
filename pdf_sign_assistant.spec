@@ -126,6 +126,7 @@ hiddenimports = [
     "modules.actualizaciones",
     "modules.actualizador",
     "modules.dispositivos",
+    "modules.errores",
     "modules.fase1_preview",
     "modules.fase2_print",
     "modules.fase3_scan",

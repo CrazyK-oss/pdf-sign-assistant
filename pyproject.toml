@@ -11,6 +11,9 @@
 # Declararlo acá lo deja funcionando con cualquiera de las dos formas.
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "integracion: necesita las dependencias reales de la app (PyQt6, PyMuPDF, Pillow)",
+]
 
 [tool.ruff]
 line-length = 90
