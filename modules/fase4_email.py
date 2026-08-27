@@ -45,10 +45,12 @@ from PyQt6.QtWidgets import (
 from modules.theme import SIZE, SPACE, repolish
 from modules.trabajo import formatear_paginas
 from modules.ui import (
+    Aviso,
     FilaAdaptable,
     abrir_en_sistema,
     boton,
     etiqueta,
+    icono_label,
     separador,
 )
 
@@ -154,9 +156,8 @@ class DialogoEnviarEmail(QDialog):
         # Título
         fila_titulo = QHBoxLayout()
         fila_titulo.setSpacing(SPACE["sm"])
-        icono = etiqueta("✉️")
-        icono.setStyleSheet("font-size: 20px;")
-        fila_titulo.addWidget(icono)
+        fila_titulo.addWidget(icono_label("sobre", SIZE["icono_lg"],
+                                          color="primary"))
         fila_titulo.addWidget(etiqueta("Enviar por correo", rol="titulo"))
         fila_titulo.addStretch()
         lay.addLayout(fila_titulo)
@@ -198,10 +199,10 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(separador())
         lay.addSpacing(SPACE["sm"])
 
-        lay.addWidget(etiqueta(
-            "ℹ️  Arrastrá el PDF desde la carpeta al correo y enviá. "
+        lay.addWidget(Aviso(
+            "Arrastrá el PDF desde la carpeta al correo y enviá. "
             "La carpeta temporal se borra al cerrar la app.",
-            rol="hint", wrap=True))
+            tono="info"))
         lay.addSpacing(SPACE["md"])
 
         # Acciones (se apilan si el diálogo queda angosto)
@@ -209,7 +210,7 @@ class DialogoEnviarEmail(QDialog):
         acciones.agregar(boton("Cancelar", variant="secondary",
                                on_click=self.reject))
         acciones.agregar_stretch()
-        self.btn_abrir = boton("✉️  Abrir correo y carpeta", min_w=200,
+        self.btn_abrir = boton("Abrir correo y carpeta", icono="sobre", min_w=200,
                                enabled=False, on_click=self._on_abrir)
         acciones.agregar(self.btn_abrir)
         lay.addWidget(acciones)
@@ -273,7 +274,7 @@ class DialogoEnviarEmail(QDialog):
         self.accept()
 
     def _restablecer_boton(self):
-        self.btn_abrir.setText("✉️  Abrir correo y carpeta")
+        self.btn_abrir.setText("Abrir correo y carpeta")
         self.btn_abrir.setEnabled(True)
 
 

@@ -1,6 +1,6 @@
 # PDF Sign Assistant
 
-> Aplicación de escritorio en Python + PyQt6 para automatizar el flujo completo de firma de documentos legales — diseñada para usuarios no técnicos con una interfaz clara, guiada y con soporte de modo claro/oscuro.
+> Caja de herramientas de escritorio en Python + PyQt6 para trabajar con PDFs: firmarlos a mano sin perder el original y armar documentos nuevos desde el escáner — diseñada para usuarios no técnicos, con una interfaz clara, guiada y con modo claro/oscuro.
 
 <p align="center">
   <img src="assets/icon.png" width="120" alt="PDF Sign Assistant">
@@ -55,14 +55,28 @@ carpetas nuevas la primera vez que arranca.
 
 ## Descripción
 
-**PDF Sign Assistant** simplifica el proceso de firmar documentos PDF físicamente y producir una copia digital actualizada. En lugar de editar PDFs manualmente o gestionar imágenes escaneadas sueltas, la app guía al usuario paso a paso: previsualizar páginas → imprimir → escanear → incrustar → guardar → enviar.
+**PDF Sign Assistant** es un menú de herramientas para trabajar con PDFs sin
+salir de tu máquina. Hoy trae dos:
 
-Toda la interacción ocurre desde una sola ventana con controles grandes, bien etiquetados y retroalimentación de estado en tiempo real.
+| Herramienta | Para qué sirve |
+|-------------|----------------|
+| **Firmar un PDF** | Imprimí las páginas que hay que firmar, firmalas a mano, escaneálas y la app las reemplaza dentro del documento original. El PDF que sale es el mismo de siempre, con tu firma real encima |
+| **Escanear a PDF** | Armá un documento nuevo página por página desde el escáner. Reordenalas, giralas, descartá la que salió mal y guardá el PDF terminado |
+
+Todo pasa en la computadora del usuario: no hay servidor, ni cuenta, ni
+subida de archivos a ningún lado.
+
+Agregar una herramienta más es sumar una entrada a `CATALOGO`
+(`modules/navegacion.py`) y registrar su widget: ni la barra lateral ni la
+pantalla de inicio hay que tocarlas.
 
 ---
 
 ## Funcionalidades
 
+- 🧰 **Menú de herramientas** — barra lateral permanente y pantalla de inicio con una tarjeta por herramienta; se colapsa a una tira de iconos cuando la ventana se angosta
+- 🖨️ **Escanear a PDF** — armá un documento nuevo hoja por hoja: cada página aparece con su miniatura y se puede subir, bajar, girar o descartar antes de guardar
+- 🎨 **Iconografía vectorial propia** — 49 iconos dibujados en SVG dentro del código, que se colorean con el tema. Ya no dependen de que la fuente del sistema tenga el emoji (`👁` salía como una raya y `🌙` como un punto, según la máquina)
 - 📄 **Vista previa en cuadrícula** — visualizá todas las páginas del PDF antes de elegir cuáles firmar
 - 🗂️ **Firma de varias páginas por sesión** — elegí 1, 3 o 20 páginas: se imprimen en un solo trabajo, se escanean en una cola y se reemplazan todas de una vez
 - 🔍 **Vista previa grande** — doble clic en una página para verla completa y decidir con seguridad
@@ -86,6 +100,8 @@ Toda la interacción ocurre desde una sola ventana con controles grandes, bien e
 
 ## Flujo de trabajo
 
+### Firmar un PDF
+
 ```
 Abrir PDF  →  Elegir páginas  →  Imprimir  →  Escanear cada hoja firmada  →  Guardar PDF  →  Enviar
 ```
@@ -103,6 +119,25 @@ que ya habías hecho.
 | 4 | `fase3_scan.py` | Cola de escaneo: una imagen por página, con rotación y avisos de orientación |
 | 5 | `fase_guardar.py` | Reemplazo de todas las páginas, metadatos y guardado del PDF firmado |
 | 6 | `fase4_email.py` | Flujo de envío: carpeta temporal + apertura del cliente de correo |
+
+### Escanear a PDF
+
+```
+Escanear hoja  →  (repetir)  →  Reordenar / girar / descartar  →  Guardar PDF
+```
+
+Es un flujo mucho más corto porque no hay documento original que respetar:
+se van apilando páginas hasta que el documento está completo.
+
+| Paso | Módulo | Descripción |
+|------|--------|-------------|
+| 1 | `escaner_qt.py` | Digitaliza una hoja a 300 DPI en un hilo aparte, sin congelar la ventana |
+| 2 | `documento_escaneado.py` | Modelo de la lista de páginas: orden, rotación y altas/bajas (lógica pura, sin Qt) |
+| 3 | `herramienta_escaneo.py` | La pantalla: miniaturas, vista previa y acciones por página |
+| 4 | `imagen_pdf.py` | Cada imagen → PDF de una página; después se unen en el documento final |
+
+También se pueden **arrastrar imágenes** a la ventana o importarlas desde el
+disco, por si el escaneo ya estaba hecho.
 
 ---
 
@@ -125,21 +160,41 @@ pdf-sign-assistant/
 │                            #  ver la tabla de "Dónde quedan tus archivos")
 └── modules/
     ├── __init__.py
-    ├── setup.py             # Rutas compatibles con PyInstaller + carga/guardado de config
+    │
+    │   # ── Base visual ───────────────────────────────────────────────
     ├── theme.py             # Sistema de diseño: paletas, tokens (espaciado/radios/tipografía), stylesheet
-    ├── ui.py                # Kit de componentes compartidos (botones, tarjetas, barras, contenedores responsive)
+    ├── iconos.py            # Catálogo de iconos SVG dibujados en código, coloreados por el tema
+    ├── ui.py                # Kit de componentes (botones con icono, chips, avisos, tarjetas, contenedores responsive)
+    ├── navegacion.py        # Catálogo de herramientas + barra lateral + pantalla de inicio
+    │
+    │   # ── Infraestructura ───────────────────────────────────────────
+    ├── setup.py             # Rutas compatibles con PyInstaller + carga/guardado de config
     ├── dispositivos.py      # Capa única de impresoras y escáneres: validación, COM y errores traducidos
+    ├── escaner_qt.py        # El hilo que abre el diálogo WIA sin congelar la ventana (lo comparten las dos herramientas)
+    ├── imagen_pdf.py        # Imagen → PDF de una página (reportlab / img2pdf / Pillow), sin Qt
     ├── errores.py           # Manejador global de excepciones: log + aviso al usuario
-    ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── version.py           # Única fuente de verdad de la versión (app, instalador y CI la leen de acá)
-    ├── actualizador.py      # Actualizador interno: consulta, descarga verificada e instalación silenciosa
+    ├── actualizaciones.py   # Lógica del actualizador: versiones, descarga y verificación SHA-256 (sin Qt)
+    ├── actualizador.py      # Capa Qt del actualizador: workers y diálogo
     ├── settings.py          # Diálogo de ajustes de correo emisor (SMTP, credenciales)
+    │
+    │   # ── Herramienta: firmar un PDF ────────────────────────────────
+    ├── trabajo.py           # Modelo del trabajo en curso: páginas, imágenes y rotaciones (lógica pura, sin Qt)
     ├── fase1_preview.py     # Cuadrícula de miniaturas y selección de página
     ├── fase2_print.py       # Integración con la impresora del sistema
-    ├── fase3_scan.py        # Carga de imagen y vista previa del escaneo
+    ├── fase3_scan.py        # Cola de escaneo: una imagen por página, con rotación
     ├── fase_guardar.py      # Lógica de reemplazo de página y guardado del PDF
-    └── fase4_email.py       # Flujo de envío: carpeta temporal + cliente de correo
+    ├── fase4_email.py       # Flujo de envío: carpeta temporal + cliente de correo
+    │
+    │   # ── Herramienta: escanear a PDF ───────────────────────────────
+    ├── documento_escaneado.py  # Modelo del documento que se arma: orden y rotación de páginas (sin Qt)
+    └── herramienta_escaneo.py  # La pantalla: miniaturas, vista previa, reordenar y guardar
 ```
+
+La separación **modelo sin Qt / pantalla** no es adorno: es lo que permite
+que los tests cubran el reordenamiento de páginas, el parseo de rangos y el
+saneamiento de nombres de archivo sin abrir una ventana ni tener un escáner
+conectado.
 
 ---
 
@@ -162,12 +217,18 @@ La carpeta `_envio_temp/` se borra **al cerrar la app** y también **al iniciarl
 
 | Atajo | Acción |
 |-------|--------|
+| `Ctrl+0` | Ir al menú de herramientas |
+| `Ctrl+1` | Abrir *Firmar un PDF* |
+| `Ctrl+2` | Abrir *Escanear a PDF* |
 | `Ctrl+O` | Abrir un PDF |
 | `Ctrl+E` | Enviar por correo el documento seleccionado |
 | `Ctrl+F` | Buscar en la lista de guardados |
 | `Ctrl+D` | Alternar tema claro / oscuro |
 | `F5` | Recargar la lista de documentos |
 | `Enter` | Editar el documento seleccionado |
+
+**En *Escanear a PDF*:** `Ctrl+N` escanea la hoja siguiente, `Ctrl+↑` / `Ctrl+↓`
+mueven la página seleccionada, `Ctrl+S` guarda el documento y `Esc` vuelve al menú.
 
 **Al elegir páginas:** `←` `→` `↑` `↓` recorren la cuadrícula, `Inicio`/`Fin`
 saltan a la primera o última página, `Espacio` (o doble clic) abre la vista
@@ -345,7 +406,39 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 
 ## Changelog
 
-### v0.10.1 — Red de seguridad *(actual)*
+### v0.11 — Caja de herramientas y UI nueva *(actual)*
+
+**Iconos que se ven en todas las máquinas**
+- Nuevo `modules/iconos.py`: **49 iconos dibujados en SVG dentro del código**, renderizados con `QSvgRenderer` y coloreados con el token del tema. Se rasterizan al DPI real de la pantalla y se cachean
+- Se eliminó **hasta el último emoji de la interfaz**. El problema no era estético: un emoji se dibuja con la fuente del sistema, y si Windows no tiene el glifo lo degrada sin avisar. En la misma app, `⚙` se veía bien, `👁` salía como una raya y `🌙` como un punto — distinto en cada equipo
+- Un test recorre el código fuente buscando cada `icono="…"` y falla si el nombre no está en el catálogo: un icono mal escrito ya no espera a que alguien abra esa pantalla
+- Otro test dibuja los 49 y falla si Qt se queja de un trazo. `QSvgRenderer` **no lanza excepción** con un path roto: lo dibuja a medias y avisa por stderr, donde nadie mira (así se había colado la bombilla incompleta)
+
+**Menú de herramientas**
+- La ventana pasó de ser una pantalla a ser un contenedor: **barra lateral permanente** + pantalla de inicio con una tarjeta por herramienta
+- La barra lateral se **colapsa a una tira de iconos** por debajo de 820 px, en vez de comerse un tercio del ancho útil
+- El inicio muestra los documentos recientes y cuántos hay en total
+- Agregar una herramienta nueva es sumar una entrada a `CATALOGO` en `modules/navegacion.py`: la barra lateral, el inicio y los atajos `Ctrl+N` salen de ahí
+
+**Herramienta nueva: Escanear a PDF**
+- Armá un documento nuevo hoja por hoja desde el escáner, con miniatura de cada página y vista previa grande de la seleccionada
+- Reordenar (botones o `Ctrl+↑`/`Ctrl+↓`), girar de a 90°, invertir el taco entero y descartar páginas antes de guardar
+- También acepta imágenes **arrastradas a la ventana** o importadas del disco
+- Escanea a **300 DPI**, no a 600 como al firmar: es calidad de documento y pesa la cuarta parte — con 20 páginas la diferencia son cientos de megas
+- Las miniaturas se leen **ya reducidas** con `QImageReader.setScaledSize()`. Cargar un escaneo A4 de 300 DPI con `QPixmap` para mostrarlo de 92 px son ~35 MB de RAM por página
+- El PDF se escribe a un archivo temporal y **recién después se renombra**: si el proceso muere a mitad de la escritura, el archivo que ya tenías no queda truncado
+- 8 tests de integración abren el PDF resultante y verifican los píxeles: que el orden de la pantalla sea el del documento, que la rotación se aplique a la página correcta, y que un fallo no deje basura a medio escribir
+
+**Rediseño visual**
+- Paleta nueva (neutros fríos + teal), tipografía y espaciado revisados
+- Componentes nuevos en el kit: `Chip`, `Aviso`, `TarjetaHerramienta`, `Buscador`, `BotonIcono`
+- **`BotonIcono` recolorea su icono solo**: el color va quemado en el pixmap, así que se regenera al pasar el mouse, al marcarse, al deshabilitarse y al cambiar el tema. Sin eso, un botón *secondary* en hover quedaba con el icono teal sobre fondo teal
+- En modo oscuro, los botones de peligro y de éxito pasaron a **texto oscuro sobre el relleno claro**: blanco sobre rosa pastel no llegaba al contraste mínimo legible
+
+**Reorganización**
+- `modules/imagen_pdf.py` y `modules/escaner_qt.py` salieron de las fases: los usan las dos herramientas, y no correspondía que la nueva importara código de una fase de la vieja
+
+### v0.10.1 — Red de seguridad
 
 - **Manejador global de excepciones.** El `.exe` se compila con `console=False`: hasta ahora, una excepción que escapara mataba la aplicación **en silencio**, sin dejar rastro. Ahora queda en el log con traceback completo y el usuario ve un aviso que le dice qué pasó y dónde está el archivo para reportarlo. Cubre también los hilos, que tienen su propio hook desde Python 3.8
 - **Tests de integración del guardado.** El pipeline central —imagen escaneada → PDF → reemplazo dentro del documento— no tenía **ni un test** en el repo. Ahora hay 7 que abren el PDF resultante y verifican los píxeles: que cada imagen aterrice en su página, que las no elegidas queden intactas, que la rotación no deforme, y que los metadatos registren las páginas firmadas. Se saltean solos en el CI liviano y corren en el job de Release, que instala las dependencias completas
@@ -354,7 +447,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 
 > Se revisó también el reemplazo de páginas con `/Rotate` (documentos escaneados con páginas giradas): el resultado es correcto —la firma queda vertical, como se escaneó— así que no hizo falta cambiar nada.
 
-### v0.10 — Blindaje frente a drivers *(actual)*
+### v0.10 — Blindaje frente a drivers
 
 **Capa única de dispositivos**
 - Nuevo `modules/dispositivos.py`: **ningún otro módulo importa `win32*`**. Impresión, escaneo, enumeración y traducción de errores pasan todos por ahí
@@ -372,7 +465,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - Si hay **más de un escáner**, se deja elegir cuál usar
 - Se verifica que el escáner haya devuelto un archivo real: antes, un escaneo vacío pasaba como éxito
 
-### v0.9 — Actualizador interno *(actual)*
+### v0.9 — Actualizador interno
 
 - **La app se actualiza sola.** Consulta una vez por día si hay versión nueva, avisa con las notas del Release renderizadas, y si el usuario acepta: descarga el instalador, **verifica su SHA-256** contra el `SHA256SUMS.txt` publicado, y lo ejecuta en silencio. Inno Setup cierra la app, actualiza y la vuelve a abrir
 - Esto es posible **porque el instalador no pide permisos de administrador**: instalando en `Program Files` cada actualización mostraría un cartel de UAC y la actualización silenciosa sería inviable
@@ -384,7 +477,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - El repositorio es configurable, por si conviene apuntar a un servidor interno
 - **38 tests nuevos** sobre comparación de versiones, política de comprobación y lectura de la respuesta del servidor (con datos falsos, sin salir a internet). Cubren el caso que rompe callado: que `1.9.0` no se considere posterior a `1.10.0` por comparar como texto
 
-### v0.8 — Distribución: instalador, CI y rutas de usuario *(actual)*
+### v0.8 — Distribución: instalador, CI y rutas de usuario
 
 **La app ya se puede instalar de verdad**
 - **Instalador Inno Setup** (`installer/`): un `Setup.exe` con acceso directo y desinstalador. Instala en la carpeta del usuario con `PrivilegesRequired=lowest`, así **no aparece el cartel de UAC** — pedir permisos de administrador para una app que no toca el sistema es fricción que hace abandonar
@@ -406,7 +499,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - `upx=False` en el `.spec`: UPX achica el binario pero **dispara falsos positivos de antivirus** en ejecutables de PyInstaller
 - README reescrito de cara al usuario: sección de descarga arriba de todo, qué hacer con la advertencia de SmartScreen y dónde quedan sus archivos
 
-### v0.7 — Firma de varias páginas por sesión *(actual)*
+### v0.7 — Firma de varias páginas por sesión
 
 **Multipágina de punta a punta**
 - **Selección múltiple** en la cuadrícula: clic alterna, `Shift+clic` marca un rango, `Ctrl+A` selecciona todas y un campo de texto acepta expresiones tipo `1, 3, 5-8`
@@ -429,7 +522,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - **Limpieza de copias huérfanas**: `pdfs_trabajo/` acumulaba archivos para siempre si la app se cerraba de golpe; ahora se borran las de más de 7 días al arrancar
 - **Variante compacta de botón** en el sistema de diseño, para acciones angostas cuyo texto no entraba con el padding normal
 
-### v0.6 — Rendimiento, estandarización visual y responsive *(actual)*
+### v0.6 — Rendimiento, estandarización visual y responsive
 
 **Rendimiento**
 - **Impresión ~8x más rápida** (`fase2_print.py`): la conversión RGB→BGR se hacía con un bucle Python byte a byte sobre ~26 MB (≈1,2 s por página con la UI congelada). Ahora usa asignación por slices, que corre en C (≈0,15 s)
@@ -472,7 +565,7 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 - `config.json` fuera del control de versiones (puede contener credenciales); se versiona `config.example.json`
 - Lógica de configuración y de apertura de carpetas unificada (estaba duplicada entre `main.py`, `settings.py` y `fase4_email.py`)
 
-### v0.5 — Flujo de envío con carpeta temporal *(actual)*
+### v0.5 — Flujo de envío con carpeta temporal
 - **Nuevo flujo de envío** (`fase4_email.py`): copia el PDF a `pdfs_firmados/_envio_temp/` y abre el cliente de correo y el Explorador simultáneamente
 - **Limpieza automática** de `_envio_temp/` a los 30 minutos vía hilo daemon
 - **Limpieza al inicio** de la app: si quedó una carpeta temporal de una sesión anterior, se elimina antes de mostrar la ventana
@@ -508,6 +601,9 @@ el build y el instalador, con el `.pfx` y su contraseña en GitHub Secrets.
 ## Roadmap
 
 - [x] ~~**Firma de múltiples páginas** — seleccionar y procesar varias páginas en una sola sesión~~ *(v0.7)*
+- [x] ~~**Menú de herramientas** — una ventana que aloje varias herramientas de PDF~~ *(v0.11)*
+- [x] ~~**Escanear a PDF** — armar un documento nuevo desde el escáner~~ *(v0.11)*
+- [ ] **Unir y dividir PDFs** — combinar documentos o extraer un rango de páginas
 - [ ] **Procesamiento por lotes** — poner en cola varios PDFs y firmarlos secuencialmente
 - [ ] **Firma digital criptográfica** — incrustar firmas digitales sin necesidad de imprimir
 - [ ] **Exportar como ZIP** — empaquetar el PDF firmado junto con sus imágenes escaneadas

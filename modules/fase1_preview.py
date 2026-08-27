@@ -43,7 +43,15 @@ from PyQt6.QtWidgets import (
 
 from modules.theme import SIZE, SPACE, THEME, repolish, theme_signals
 from modules.trabajo import formatear_paginas, parsear_paginas
-from modules.ui import BarraInferior, BarraSuperior, boton, etiqueta
+from modules.ui import (
+    Aviso,
+    BarraInferior,
+    BarraSuperior,
+    IconoLabel,
+    boton,
+    boton_icono,
+    etiqueta,
+)
 
 try:
     import fitz  # PyMuPDF
@@ -165,8 +173,8 @@ class DialogoVistaPagina(QDialog):
         raiz.setSpacing(0)
 
         self.cabecera = BarraSuperior("")
-        self.cabecera.agregar(boton("✕", variant="ghost", fixed_w=40,
-                                    tooltip="Cerrar (Esc)", on_click=self.accept))
+        self.cabecera.agregar(boton_icono("cerrar", tooltip="Cerrar (Esc)",
+                                          lado=40, on_click=self.accept))
         raiz.addWidget(self.cabecera)
 
         self.lbl_img = QLabel()
@@ -180,12 +188,12 @@ class DialogoVistaPagina(QDialog):
         raiz.addWidget(contenedor, 1)
 
         self.pie = BarraInferior("")
-        self.btn_anterior = boton("←", variant="ghost", fixed_w=44,
-                                  tooltip="Página anterior",
-                                  on_click=lambda: self._navegar(-1))
-        self.btn_siguiente = boton("→", variant="ghost", fixed_w=44,
-                                   tooltip="Página siguiente",
-                                   on_click=lambda: self._navegar(1))
+        self.btn_anterior = boton_icono("chevron-izq", lado=44,
+                                        tooltip="Página anterior",
+                                        on_click=lambda: self._navegar(-1))
+        self.btn_siguiente = boton_icono("chevron-der", lado=44,
+                                         tooltip="Página siguiente",
+                                         on_click=lambda: self._navegar(1))
         self.btn_marcar = boton("", height=SIZE["btn_lg"], min_w=180,
                                 on_click=self._alternar)
         self.pie.agregar(self.btn_anterior)
@@ -226,10 +234,10 @@ class DialogoVistaPagina(QDialog):
 
     def _actualizar_boton(self):
         activa = self.pagina in self.seleccionadas
-        self.btn_marcar.setText("✓  Seleccionada — quitar" if activa
+        self.btn_marcar.setText("Seleccionada — quitar" if activa
                                 else "Seleccionar esta página")
-        self.btn_marcar.setProperty("variant", "danger" if activa else "primary")
-        repolish(self.btn_marcar)
+        self.btn_marcar.set_nombre_icono("cerrar" if activa else "check")
+        self.btn_marcar.set_variant("danger" if activa else "primary")
         self.pie.set_estado(
             f"{len(self.seleccionadas)} seleccionada(s)  ·  "
             "Espacio marca · ← → navega · Esc cierra", rol="hint")
@@ -305,7 +313,7 @@ class TarjetaPagina(QFrame):
         fila = QHBoxLayout()
         fila.setSpacing(SPACE["xs"])
         fila.addStretch()
-        self.lbl_check = etiqueta("✓", rol="ok")
+        self.lbl_check = IconoLabel("check-circulo", 15, color="primary")
         self.lbl_check.setVisible(False)
         fila.addWidget(self.lbl_check)
         self.lbl_num = etiqueta(f"Página {num_pagina + 1}", rol="cuerpo")
@@ -464,7 +472,7 @@ class VistaPrevisualizacion(QWidget):
         self.lbl_conteo = etiqueta("Cargando…", rol="hint")
         self.cabecera.agregar(self.lbl_conteo)
 
-        self.btn_cancelar = boton("✕  Cancelar", variant="ghost",
+        self.btn_cancelar = boton("Cancelar", variant="ghost", icono="cerrar",
                                   tooltip="Cerrar sin seleccionar (Esc)",
                                   on_click=self._on_cancelar)
         self.btn_cancelar.setProperty("danger", "true")
@@ -519,7 +527,7 @@ class VistaPrevisualizacion(QWidget):
         # ── Barra inferior ───────────────────────────────────
         self.pie = BarraInferior(
             "Clic para elegir · Shift+clic para un rango · doble clic para ampliar")
-        self.btn_continuar = boton("Imprimir páginas  →",
+        self.btn_continuar = boton("Imprimir páginas", icono="impresora",
                                    height=SIZE["btn_lg"], enabled=False,
                                    tooltip="Enviar las páginas elegidas a la impresora (Enter)",
                                    on_click=self._on_continuar)
@@ -590,9 +598,7 @@ class VistaPrevisualizacion(QWidget):
 
     def _mostrar_error(self, mensaje: str):
         self.lbl_conteo.setText("Error")
-        lbl = etiqueta(f"⚠  {mensaje}", rol="error", wrap=True,
-                       align=Qt.AlignmentFlag.AlignCenter)
-        self.grid.addWidget(lbl, 0, 0)
+        self.grid.addWidget(Aviso(mensaje, tono="err"), 0, 0)
 
     # ══════════════════════════════════════════
     #  Layout responsive
@@ -718,14 +724,14 @@ class VistaPrevisualizacion(QWidget):
                 f"{cantidad} página{plural}: {formatear_paginas(sorted(self._seleccion))}")
             self.lbl_seleccion.setProperty("rol", "ok")
             self.btn_continuar.setText(
-                f"Imprimir {cantidad} página{plural}  →")
+                f"Imprimir {cantidad} página{plural}")
             self.pie.set_estado(
-                f"✔  {formatear_paginas(sorted(self._seleccion))} "
-                f"— listas para imprimir", rol="ok")
+                f"{formatear_paginas(sorted(self._seleccion))} "
+                f"— listas para imprimir", rol="ok", tono="ok")
         else:
             self.lbl_seleccion.setText("Ninguna página seleccionada")
             self.lbl_seleccion.setProperty("rol", "hint")
-            self.btn_continuar.setText("Imprimir páginas  →")
+            self.btn_continuar.setText("Imprimir páginas")
             self.pie.set_estado(
                 "Clic para elegir · Shift+clic para un rango · doble clic para ampliar")
         repolish(self.lbl_seleccion)
