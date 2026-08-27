@@ -38,13 +38,9 @@ pytest.importorskip("PIL", reason="Necesita Pillow")
 
 import pymupdf  # noqa: E402
 from PIL import Image  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from modules.fase_guardar import (  # noqa: E402
-    _WorkerGuardar,
-    aplicar_rotacion,
-    leer_paginas_firmadas,
-)
+from modules.fase_guardar import _WorkerGuardar, leer_paginas_firmadas  # noqa: E402
+from modules.imagen_pdf import aplicar_rotacion  # noqa: E402
 from modules.trabajo import TrabajoFirma  # noqa: E402
 
 pytestmark = pytest.mark.integracion
@@ -53,10 +49,9 @@ TIMEOUT = 90        # segundos para el worker
 
 
 @pytest.fixture(scope="module")
-def app():
-    """Una sola QApplication para todo el módulo (Qt no admite dos)."""
-    instancia = QApplication.instance() or QApplication(["tests"])
-    yield instancia
+def app(qapp):
+    """La QApplication compartida (ver tests/conftest.py)."""
+    return qapp
 
 
 @pytest.fixture

@@ -38,9 +38,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
-import sys
-import tempfile
 import traceback
 from pathlib import Path
 
@@ -57,6 +54,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from modules.imagen_pdf import _borrar_si_existe, _convertir_imagen_a_pdf
 from modules.theme import SIZE, SPACE, repolish, theme_signals
 from modules.trabajo import TrabajoFirma, formatear_paginas
 from modules.ui import (
@@ -75,197 +73,6 @@ CARACTERES_INVALIDOS = set('/\\:*?"<>|')
 
 # Clave propia en el diccionario Info del PDF con las páginas firmadas
 CLAVE_META_PAGINAS = "/PSAPaginas"
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Script auxiliar que corre img2pdf en subproceso aislado
-# ─────────────────────────────────────────────────────────────────────────
-_IMG2PDF_WORKER_SCRIPT = """
-import sys, img2pdf
-ruta_img = sys.argv[1]
-ruta_out  = sys.argv[2]
-with open(ruta_img, "rb") as f:
-    datos = img2pdf.convert(f)
-with open(ruta_out, "wb") as f:
-    f.write(datos)
-"""
-
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Helpers de conversión imagen → PDF temporal
-# ─────────────────────────────────────────────────────────────────────────
-
-def _normalizar_modo_pillow(img):
-    """Convierte la imagen al modo correcto para guardar como PDF con Pillow.
-
-    Pillow soporta RGB y L en PDF. Cualquier otro modo se convierte:
-      - RGBA / PA  → composición sobre fondo blanco → RGB
-      - P (paleta) → RGB
-      - L, LA      → L (escala de grises, alpha descartada)
-      - CMYK y resto → RGB
-    """
-    modo = img.mode
-    if modo in ("RGB", "L"):
-        return img
-    if modo in ("RGBA", "PA"):
-        from PIL import Image as _Image
-        fondo = _Image.new("RGB", img.size, (255, 255, 255))
-        rgba = img.convert("RGBA")
-        fondo.paste(rgba, mask=rgba.split()[3])
-        return fondo
-    if modo == "LA":
-        return img.convert("L")
-    return img.convert("RGB")
-
-
-def aplicar_rotacion(ruta_imagen: str, grados: int) -> tuple[str, bool]:
-    """Devuelve (ruta, es_temporal) con la imagen ya rotada.
-
-    Rota en sentido horario para coincidir con lo que muestra la vista
-    previa (QTransform().rotate() gira en horario; PIL, en antihorario).
-    El archivo original nunca se toca: se escribe una copia temporal.
-    """
-    grados = int(grados) % 360
-    if grados == 0:
-        return ruta_imagen, False
-
-    from PIL import Image
-    with Image.open(ruta_imagen) as img:
-        rotada = img.rotate(-grados, expand=True)
-        rotada = _normalizar_modo_pillow(rotada)
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp.close()
-        # Conserva el DPI para que la página resultante mida lo mismo
-        dpi = img.info.get("dpi")
-        if dpi:
-            rotada.save(tmp.name, "PNG", dpi=dpi)
-        else:
-            rotada.save(tmp.name, "PNG")
-    log.debug("Rotación %d° aplicada → %s", grados, tmp.name)
-    return tmp.name, True
-
-
-def _imagen_a_pdf_reportlab(ruta_imagen: str) -> str:
-    """Convierte imagen a PDF de una página con reportlab (motor principal:
-    es el más robusto en Windows con JPG/PNG/BMP)."""
-    from PIL import Image
-    from reportlab.lib.utils import ImageReader
-    from reportlab.pdfgen import canvas
-
-    with Image.open(ruta_imagen) as img:
-        ancho_px, alto_px = img.size
-        dpi = img.info.get("dpi", (150, 150))
-        if isinstance(dpi, (int, float)):
-            dpi = (dpi, dpi)
-        dpi_x = dpi[0] if dpi[0] > 0 else 150
-        dpi_y = dpi[1] if dpi[1] > 0 else 150
-
-    ancho_pt = ancho_px * 72.0 / dpi_x
-    alto_pt = alto_px * 72.0 / dpi_y
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    tmp.close()
-
-    c = canvas.Canvas(tmp.name, pagesize=(ancho_pt, alto_pt))
-    c.drawImage(ImageReader(ruta_imagen), 0, 0,
-                width=ancho_pt, height=alto_pt, preserveAspectRatio=False)
-    c.save()
-
-    if Path(tmp.name).stat().st_size == 0:
-        _borrar_si_existe(tmp.name)
-        raise RuntimeError("reportlab generó un PDF vacío (0 bytes)")
-    return tmp.name
-
-
-def _imagen_a_pdf_pillow(ruta_imagen: str) -> str:
-    """Convierte una imagen a PDF de una página usando Pillow."""
-    from PIL import Image
-    with Image.open(ruta_imagen) as img_orig:
-        img = _normalizar_modo_pillow(img_orig)
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        tmp.close()
-        img.save(tmp.name, "PDF", resolution=150)
-    return tmp.name
-
-
-def _imagen_a_pdf_img2pdf(ruta_imagen: str) -> str:
-    """Convierte con img2pdf en un subproceso aislado.
-
-    En modo congelado (PyInstaller) se salta: sys.executable apunta al
-    propio .exe y lanzar `-c` abriría otra instancia de la aplicación.
-    """
-    if getattr(sys, "frozen", False):
-        raise RuntimeError("img2pdf no se usa en modo congelado (.exe)")
-
-    try:
-        import importlib
-        importlib.import_module("img2pdf")
-    except ImportError as exc:
-        raise ImportError("img2pdf no está instalado") from exc
-
-    tmp_out = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    tmp_out.close()
-
-    try:
-        resultado = subprocess.run(
-            [sys.executable, "-c", _IMG2PDF_WORKER_SCRIPT,
-             ruta_imagen, tmp_out.name],
-            capture_output=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _borrar_si_existe(tmp_out.name)
-        raise RuntimeError("img2pdf: timeout tras 60 s") from exc
-    except Exception as exc:
-        _borrar_si_existe(tmp_out.name)
-        raise RuntimeError(f"img2pdf: error al lanzar subproceso — {exc}") from exc
-
-    if resultado.returncode != 0:
-        stderr = resultado.stderr.decode(errors="replace").strip()
-        _borrar_si_existe(tmp_out.name)
-        raise RuntimeError(
-            f"img2pdf terminó con código {resultado.returncode}. stderr: {stderr}")
-
-    if Path(tmp_out.name).stat().st_size == 0:
-        _borrar_si_existe(tmp_out.name)
-        raise RuntimeError("img2pdf generó un PDF vacío (0 bytes)")
-    return tmp_out.name
-
-
-def _borrar_si_existe(ruta: str | None) -> None:
-    try:
-        if ruta and Path(ruta).exists():
-            os.remove(ruta)
-    except OSError:
-        pass
-
-
-def _convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0) -> str:
-    """Convierte una imagen (con su rotación) a un PDF de una página.
-
-    Intenta reportlab → img2pdf (subproceso) → Pillow, en ese orden.
-    """
-    ruta_rotada, temporal = aplicar_rotacion(ruta_imagen, rotacion)
-    try:
-        for nombre, motor in (
-            ("reportlab", _imagen_a_pdf_reportlab),
-            ("img2pdf", _imagen_a_pdf_img2pdf),
-        ):
-            try:
-                ruta = motor(ruta_rotada)
-                log.debug("Conversión con %s OK → %s", nombre, ruta)
-                return ruta
-            except ImportError:
-                log.debug("%s no disponible, probando el siguiente motor", nombre)
-            except Exception as e:                   # noqa: BLE001
-                log.warning("%s falló (%s: %s) — probando el siguiente motor",
-                            nombre, type(e).__name__, e)
-
-        log.debug("Usando Pillow como último fallback")
-        return _imagen_a_pdf_pillow(ruta_rotada)
-    finally:
-        if temporal:
-            _borrar_si_existe(ruta_rotada)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -470,8 +277,8 @@ class FaseGuardar(QDialog):
         raiz.addWidget(cuerpo, 1)
 
         self.pie = BarraInferior("Revisá el nombre y confirmá para guardar.")
-        self.btn_guardar = boton("Guardar documento  ✓", variant="success",
-                                 height=SIZE["btn_lg"],
+        self.btn_guardar = boton("Guardar documento", icono="check",
+                                 variant="success", height=SIZE["btn_lg"],
                                  tooltip="Guardar el PDF firmado (Enter)",
                                  on_click=self._on_guardar)
         self.pie.agregar(self.btn_guardar)
@@ -674,7 +481,7 @@ class FaseGuardar(QDialog):
             self.lbl_error_detalle.hide()
             self.panel_progreso.show()
         else:
-            self.btn_guardar.setText("Guardar documento  ✓")
+            self.btn_guardar.setText("Guardar documento")
             self.pie.set_estado("Revisá el nombre y confirmá para guardar.")
 
     @pyqtSlot(int, str)
@@ -710,7 +517,7 @@ class FaseGuardar(QDialog):
         self._set_guardando(False)
 
         resumen = mensaje.split("\n")[0]
-        self.lbl_progreso_etapa.setText("❌  Error al guardar")
+        self.lbl_progreso_etapa.setText("Error al guardar")
         self.lbl_progreso_etapa.setProperty("rol", "error")
         repolish(self.lbl_progreso_etapa)
         self.lbl_error_detalle.setText(resumen)

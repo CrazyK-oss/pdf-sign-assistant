@@ -38,8 +38,10 @@ from modules.setup import guardar_config
 from modules.theme import SIZE, SPACE
 from modules.ui import (
     AreaScroll,
+    Aviso,
     FilaAdaptable,
     boton,
+    boton_icono,
     etiqueta,
     separador,
 )
@@ -132,9 +134,9 @@ class DialogoAjustes(QDialog):
         self.input_password.setPlaceholderText("Contraseña de aplicación (opcional)")
         self.input_password.setEchoMode(QLineEdit.EchoMode.Password)
 
-        self.btn_toggle_pass = boton("👁", variant="ghost", fixed_w=40,
-                                     tooltip="Mostrar / ocultar contraseña")
-        self.btn_toggle_pass.setCheckable(True)
+        self.btn_toggle_pass = boton_icono(
+            "ojo", tooltip="Mostrar / ocultar contraseña", lado=SIZE["input"],
+            checkable=True)
         self.btn_toggle_pass.toggled.connect(self._toggle_password)
 
         contenedor_pass = QWidget()
@@ -146,10 +148,10 @@ class DialogoAjustes(QDialog):
         form_creds.addRow("Contraseña:", contenedor_pass)
         root.addLayout(form_creds)
 
-        root.addWidget(etiqueta(
-            "⚠️  La contraseña se guarda en texto plano en config.json y hoy "
+        root.addWidget(Aviso(
+            "La contraseña se guarda en texto plano en config.json y hoy "
             "ningún envío la usa (el correo se abre en tu cliente por mailto:). "
-            "Podés dejarla vacía.", rol="hint", wrap=True))
+            "Podés dejarla vacía.", tono="warn"))
         root.addSpacing(SPACE["md"])
         root.addWidget(separador())
         root.addSpacing(SPACE["sm"])
@@ -207,7 +209,8 @@ class DialogoAjustes(QDialog):
         acciones.agregar(boton("Cancelar", variant="secondary",
                                on_click=self.reject))
         acciones.agregar_stretch()
-        acciones.agregar(boton("💾  Guardar ajustes", height=SIZE["btn_lg"],
+        acciones.agregar(boton("Guardar ajustes", icono="guardar",
+                               height=SIZE["btn_lg"],
                                min_w=160, on_click=self._guardar))
         lay_pie.addWidget(acciones)
         raiz.addWidget(pie)

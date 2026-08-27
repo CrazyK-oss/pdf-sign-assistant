@@ -20,6 +20,16 @@ Provee:
 Uso:
     from modules.theme import apply_theme, THEME, font_pt
     apply_theme(app, "dark")   # o "light"
+
+Notas de mantenimiento (aprendidas a los golpes)
+------------------------------------------------
+1. El color de fondo se aplica SOLO a ventanas y contenedores con
+   objectName propio. Puesto sobre `QWidget` genérico, Qt pinta un
+   rectángulo opaco detrás de cada hijo y rompe todas las tarjetas.
+2. Al `QCheckBox::indicator` no se le pinta fondo: en cuanto se hace,
+   Qt deja de dibujar el tilde y queda un cuadrado lleno ambiguo.
+3. QSS no soporta box-shadow. Para dar profundidad se usa
+   `modules.ui.sombra()`, que aplica un QGraphicsDropShadowEffect.
 """
 
 from __future__ import annotations
@@ -34,80 +44,104 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 LIGHT = {
     # Superficies
-    "bg":             "#f7f6f2",
-    "surface":        "#f0ede8",
-    "surface_2":      "#e8e5df",
-    "surface_3":      "#dedad3",
-    "surface_hover":  "#e2dfd8",
-    "elevated":       "#fdfcfa",
+    "bg":             "#f5f6f8",
+    "surface":        "#ffffff",
+    "surface_2":      "#eef1f4",
+    "surface_3":      "#e2e6ec",
+    "surface_hover":  "#e8ecf1",
+    "elevated":       "#ffffff",
+    "sidebar":        "#ffffff",
     # Bordes
-    "border":         "#cac7c0",
-    "border_soft":    "#dedad3",
+    "border":         "#d3d9e0",
+    "border_soft":    "#e4e8ee",
+    "border_fuerte":  "#b9c2cd",
     # Texto
-    "text":           "#1a1815",
-    "text_muted":     "#63615c",
-    "text_faint":     "#96948f",
+    "text":           "#101720",
+    "text_muted":     "#57626f",
+    "text_faint":     "#8a94a1",
     "text_inverse":   "#ffffff",
     # Primario — Teal profundo
-    "primary":        "#006b71",
-    "primary_h":      "#005259",
-    "primary_a":      "#003d42",
-    "primary_hl":     "#a8ccc9",
-    "primary_soft":   "#e4f0ee",
+    "primary":        "#0d7068",
+    "primary_h":      "#0a5c55",
+    "primary_a":      "#084842",
+    "primary_hl":     "#8fcdc6",
+    "primary_soft":   "#e3f2f0",
     "on_primary":     "#ffffff",
     # Peligro
-    "danger":         "#b83246",
-    "danger_h":       "#8f2437",
-    "danger_a":       "#6b1828",
-    "danger_soft":    "#f5e0e3",
+    "danger":         "#b8253f",
+    "danger_h":       "#951c33",
+    "danger_a":       "#711526",
+    "danger_soft":    "#fbe6ea",
+    "on_danger":      "#ffffff",
     # Éxito
-    "success":        "#3d7520",
-    "success_h":      "#2d5c12",
-    "success_a":      "#1f4408",
-    "success_soft":   "#daefd0",
-    # Status bar
-    "statusbar_bg":   "#ebe8e3",
-    # Sombra
-    "shadow":         "rgba(0,0,0,0.07)",
+    "success":        "#1c7a3e",
+    "success_h":      "#156130",
+    "success_a":      "#0f4a24",
+    "success_soft":   "#e0f4e6",
+    "on_success":     "#ffffff",
+    # Advertencia
+    "warning":        "#a35a08",
+    "warning_h":      "#834806",
+    "warning_soft":   "#fdefdc",
+    # Informativo
+    "info":           "#1f52c4",
+    "info_soft":      "#e6ecfb",
+    # Barra de estado
+    "statusbar_bg":   "#eef1f4",
+    # Sombra (la usa ui.sombra(), no el QSS)
+    "shadow":         "rgba(16,23,32,0.13)",
 }
 
 DARK = {
     # Superficies
-    "bg":             "#141312",
-    "surface":        "#1c1b19",
-    "surface_2":      "#242320",
-    "surface_3":      "#2c2b28",
-    "surface_hover":  "#2e2d2a",
-    "elevated":       "#211f1d",
+    "bg":             "#0e1218",
+    "surface":        "#171c23",
+    "surface_2":      "#1e242c",
+    "surface_3":      "#272e38",
+    "surface_hover":  "#232a33",
+    "elevated":       "#1b212a",
+    "sidebar":        "#12171d",
     # Bordes
-    "border":         "#3a3834",
-    "border_soft":    "#302f2c",
+    "border":         "#2e3742",
+    "border_soft":    "#232a33",
+    "border_fuerte":  "#414c59",
     # Texto
-    "text":           "#e8e6e1",
-    "text_muted":     "#9c9a93",
-    "text_faint":     "#6d6b66",
-    "text_inverse":   "#141312",
+    "text":           "#e7ecf2",
+    "text_muted":     "#98a3b1",
+    "text_faint":     "#6a7583",
+    "text_inverse":   "#0e1218",
     # Primario — Teal claro (contraste sobre oscuro)
-    "primary":        "#4da8b0",
-    "primary_h":      "#60bec7",
-    "primary_a":      "#77d0d8",
-    "primary_hl":     "#2b5457",
-    "primary_soft":   "#162a2b",
-    "on_primary":     "#0b1a1b",
+    "primary":        "#33c7b7",
+    "primary_h":      "#57d6c8",
+    "primary_a":      "#7ce3d8",
+    "primary_hl":     "#1c6b63",
+    "primary_soft":   "#10302e",
+    "on_primary":     "#04211e",
     # Peligro
-    "danger":         "#e8657a",
-    "danger_h":       "#f07a8d",
-    "danger_a":       "#f591a0",
-    "danger_soft":    "#3a1c22",
+    "danger":         "#f4718a",
+    "danger_h":       "#f88b9f",
+    "danger_a":       "#fba5b5",
+    "danger_soft":    "#3a1a22",
+    # Sobre un relleno claro en modo oscuro el texto va oscuro: blanco
+    # sobre rosa/verde pastel no llega al contraste mínimo legible.
+    "on_danger":      "#3c0c17",
     # Éxito
-    "success":        "#72ba4f",
-    "success_h":      "#88cc63",
-    "success_a":      "#9ad978",
-    "success_soft":   "#1e3318",
-    # Status bar
-    "statusbar_bg":   "#181715",
+    "success":        "#57cc7a",
+    "success_h":      "#75da93",
+    "success_a":      "#92e5aa",
+    "success_soft":   "#12301d",
+    "on_success":     "#07260f",
+    # Advertencia
+    "warning":        "#e8a33c",
+    "warning_h":      "#f0b55c",
+    "warning_soft":   "#332310",
+    # Informativo
+    "info":           "#6d9cf5",
+    "info_soft":      "#141f36",
+    # Barra de estado
+    "statusbar_bg":   "#12171d",
     # Sombra
-    "shadow":         "rgba(0,0,0,0.35)",
+    "shadow":         "rgba(0,0,0,0.5)",
 }
 
 
@@ -122,34 +156,47 @@ SPACE = {
     "lg":  16,
     "xl":  24,
     "2xl": 32,
+    "3xl": 44,
 }
 
 RADIUS = {
-    "sm": 5,
-    "md": 7,
-    "lg": 10,
-    "xl": 13,
+    "sm": 6,
+    "md": 8,
+    "lg": 12,
+    "xl": 16,
+    "full": 999,
 }
 
 # Tamaños de fuente (px, coherentes con el QSS)
 FS = {
-    "micro": 11,
-    "small": 12,
-    "body":  13,
-    "lead":  14,
-    "h2":    16,
-    "h1":    19,
+    "micro":   11,
+    "small":   12,
+    "body":    13,
+    "lead":    14,
+    "h3":      15,
+    "h2":      17,
+    "h1":      20,
+    "display": 26,
 }
 
-# Alturas estándar de controles
+# Alturas estándar de controles y medidas de layout
 SIZE = {
     "input":      36,
     "btn":        36,
     "btn_lg":     42,
     "btn_sm":     30,
-    "bar":        58,   # alto mínimo de cabeceras / barras inferiores
+    "bar":        60,   # alto mínimo de cabeceras / barras inferiores
     "thumb_w":    174,  # ancho base de la tarjeta de página (fase 1)
     "thumb_img":  222,  # alto del área de imagen de la tarjeta
+    "sidebar":    236,  # ancho de la barra lateral expandida
+    "rail":       64,   # ancho cuando se colapsa a sólo iconos
+    "nav":        40,   # alto de un ítem de navegación
+    "icono":      18,   # icono dentro de un botón o etiqueta
+    "icono_md":   22,
+    "icono_lg":   28,   # icono de encabezado
+    "icono_xl":   40,   # icono de tarjeta de herramienta
+    "tarjeta_h":  190,  # alto de la tarjeta del launcher
+    "miniatura":  138,  # alto de la miniatura en la lista de escaneo
 }
 
 # Puntos de corte para layouts responsive (px de ancho de ventana)
@@ -157,6 +204,7 @@ BREAKPOINT = {
     "sm": 620,
     "md": 820,
     "lg": 1040,
+    "xl": 1320,
 }
 
 
@@ -209,22 +257,32 @@ def set_prop(widget: QWidget, nombre: str, valor) -> None:
     repolish(widget)
 
 
+def color(token: str, alterno: str = "") -> str:
+    """Color del tema activo por nombre de token.
+
+    Acepta también un color literal ('#ff0000'), que devuelve tal cual:
+    así las funciones que reciben `color=` de afuera no tienen que
+    distinguir entre token y valor.
+    """
+    return THEME.get(token, alterno or token)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Generador de stylesheet
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_stylesheet(p: dict) -> str:
-    r, f = RADIUS, FS
+    r, f, s = RADIUS, FS, SIZE
     return f"""
 /* ═══ Base ═══════════════════════════════════════════════════════════════════
-   IMPORTANTE: el fondo se aplica SOLO a ventanas y contenedores con nombre.
-   Aplicarlo a QWidget genérico pintaba un rectángulo opaco detrás de cada
-   QLabel/QFrame hijo y rompía visualmente todas las tarjetas.              */
+   El fondo se aplica SOLO a ventanas y contenedores con nombre. Aplicarlo a
+   QWidget genérico pintaba un rectángulo opaco detrás de cada hijo.        */
 QMainWindow, QDialog, QWidget#pantalla {{
     background-color: {p['bg']};
 }}
 * {{
-    font-family: 'Segoe UI', 'Inter', 'Helvetica Neue', 'Noto Sans', sans-serif;
+    font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Inter',
+                 'SF Pro Text', 'Noto Sans', sans-serif;
     color: {p['text']};
 }}
 QWidget {{
@@ -241,29 +299,29 @@ QFrame {{
 /* ═══ Scroll bars ════════════════════════════════════════════════════════════ */
 QScrollBar:vertical {{
     background: transparent;
-    width: 10px;
-    margin: 0;
+    width: 11px;
+    margin: 2px;
 }}
 QScrollBar::handle:vertical {{
     background: {p['border']};
-    border-radius: 5px;
-    min-height: 28px;
+    border-radius: 4px;
+    min-height: 30px;
 }}
-QScrollBar::handle:vertical:hover  {{ background: {p['text_muted']}; }}
+QScrollBar::handle:vertical:hover  {{ background: {p['text_faint']}; }}
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical      {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollBar:horizontal {{
     background: transparent;
-    height: 10px;
-    margin: 0;
+    height: 11px;
+    margin: 2px;
 }}
 QScrollBar::handle:horizontal {{
     background: {p['border']};
-    border-radius: 5px;
-    min-width: 28px;
+    border-radius: 4px;
+    min-width: 30px;
 }}
-QScrollBar::handle:horizontal:hover {{ background: {p['text_muted']}; }}
+QScrollBar::handle:horizontal:hover {{ background: {p['text_faint']}; }}
 QScrollBar::add-line:horizontal,
 QScrollBar::sub-line:horizontal     {{ width: 0; }}
 
@@ -278,32 +336,41 @@ QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {p['elevated']};
     border: 1px solid {p['border']};
     border-radius: {r['md']}px;
-    padding: 6px 10px;
+    padding: 6px 11px;
     font-size: {f['body']}px;
     color: {p['text']};
-    min-height: {SIZE['input'] - 14}px;
+    min-height: {s['input'] - 14}px;
     selection-background-color: {p['primary']};
     selection-color: {p['on_primary']};
 }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus,
 QTextEdit:focus, QPlainTextEdit:focus {{
     border: 1px solid {p['primary']};
-    background-color: {p['elevated']};
 }}
 QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled, QTextEdit:disabled {{
-    background-color: {p['surface']};
+    background-color: {p['surface_2']};
     color: {p['text_faint']};
     border-color: {p['border_soft']};
 }}
 QLineEdit:hover:!focus, QSpinBox:hover:!focus, QComboBox:hover:!focus {{
-    border-color: {p['text_muted']};
+    border-color: {p['border_fuerte']};
 }}
 QLineEdit[invalid="true"], QLineEdit[invalid="true"]:focus {{
     border: 1px solid {p['danger']};
 }}
 QTextEdit[readonly="true"] {{
-    background-color: {p['surface']};
+    background-color: {p['surface_2']};
     color: {p['text_muted']};
+}}
+/* Buscador: deja lugar al icono de lupa que se dibuja adentro */
+QLineEdit#buscador {{
+    padding-left: 32px;
+    background-color: {p['surface_2']};
+    border-color: transparent;
+}}
+QLineEdit#buscador:focus {{
+    background-color: {p['elevated']};
+    border-color: {p['primary']};
 }}
 
 /* ═══ ComboBox ══════════════════════════════════════════════════════════════ */
@@ -341,8 +408,8 @@ QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
 }}
 
 /* ═══ Botones ════════════════════════════════════════════════════════════════
-   Variantes vía propiedad dinámica  variant = primary | secondary | ghost
-                                               | danger  | success             */
+   Variantes vía propiedad dinámica
+     variant = primary | secondary | ghost | danger | success | nav | plano   */
 QPushButton {{
     background-color: {p['primary']};
     color: {p['on_primary']};
@@ -351,7 +418,7 @@ QPushButton {{
     padding: 8px 18px;
     font-weight: 600;
     font-size: {f['body']}px;
-    min-height: {SIZE['btn'] - 18}px;
+    min-height: {s['btn'] - 18}px;
 }}
 QPushButton:hover   {{ background-color: {p['primary_h']}; }}
 QPushButton:pressed {{ background-color: {p['primary_a']}; }}
@@ -362,23 +429,27 @@ QPushButton:disabled {{
     border-color: transparent;
 }}
 
-/* Compacto: para botones angostos de acción rápida (rotar, ±90°…),
-   donde el padding normal de 18px se comería el texto. */
+/* Compacto: botones angostos de acción rápida (rotar, ±90°…), donde el
+   padding normal de 18px se comería el texto. */
 QPushButton[compacto="true"] {{
-    padding: 4px 8px;
+    padding: 4px 9px;
     font-size: {f['small']}px;
+}}
+/* Sólo icono: cuadrado, sin padding lateral que descentre el dibujo. */
+QPushButton[soloicono="true"] {{
+    padding: 0;
 }}
 
 QPushButton[variant="danger"] {{
     background-color: {p['danger']};
-    color: #ffffff;
+    color: {p['on_danger']};
 }}
 QPushButton[variant="danger"]:hover   {{ background-color: {p['danger_h']}; }}
 QPushButton[variant="danger"]:pressed {{ background-color: {p['danger_a']}; }}
 
 QPushButton[variant="success"] {{
     background-color: {p['success']};
-    color: #ffffff;
+    color: {p['on_success']};
 }}
 QPushButton[variant="success"]:hover   {{ background-color: {p['success_h']}; }}
 QPushButton[variant="success"]:pressed {{ background-color: {p['success_a']}; }}
@@ -411,7 +482,7 @@ QPushButton[variant="ghost"] {{
 QPushButton[variant="ghost"]:hover {{
     background-color: {p['surface_2']};
     color: {p['text']};
-    border-color: {p['text_muted']};
+    border-color: {p['border_fuerte']};
 }}
 QPushButton[variant="ghost"]:pressed {{ background-color: {p['surface_3']}; }}
 QPushButton[variant="ghost"]:disabled {{
@@ -425,7 +496,7 @@ QPushButton[variant="ghost"][danger="true"] {{
 }}
 QPushButton[variant="ghost"][danger="true"]:hover {{
     background-color: {p['danger']};
-    color: #ffffff;
+    color: {p['on_danger']};
 }}
 QPushButton[variant="ghost"]:checked {{
     background-color: {p['primary_soft']};
@@ -433,16 +504,59 @@ QPushButton[variant="ghost"]:checked {{
     border-color: {p['primary']};
 }}
 
-/* ═══ Checkbox ═══════════════════════════════════════════════════════════════ */
+/* Plano: sin borde, para acciones terciarias dentro de una tarjeta. */
+QPushButton[variant="plano"] {{
+    background-color: transparent;
+    color: {p['text_muted']};
+    border: 1px solid transparent;
+    font-weight: 500;
+    padding: 6px 10px;
+    /* Alineado a la izquierda: cuando el botón ocupa todo el ancho (una
+       fila de "documentos recientes"), centrado se lee como un título
+       suelto en vez de como un ítem de lista. */
+    text-align: left;
+}}
+QPushButton[variant="plano"]:hover {{
+    background-color: {p['surface_2']};
+    color: {p['text']};
+}}
+QPushButton[variant="plano"]:pressed {{ background-color: {p['surface_3']}; }}
+QPushButton[variant="plano"]:disabled {{ color: {p['text_faint']}; }}
+
+/* Navegación de la barra lateral: texto a la izquierda, sin borde,
+   estado activo marcado con fondo suave. */
+QPushButton[variant="nav"] {{
+    background-color: transparent;
+    color: {p['text_muted']};
+    border: 1px solid transparent;
+    border-radius: {r['md']}px;
+    padding: 0 12px;
+    font-weight: 500;
+    font-size: {f['body']}px;
+    text-align: left;
+    min-height: {s['nav']}px;
+}}
+QPushButton[variant="nav"]:hover {{
+    background-color: {p['surface_2']};
+    color: {p['text']};
+}}
+QPushButton[variant="nav"]:checked {{
+    background-color: {p['primary_soft']};
+    color: {p['primary']};
+    font-weight: 600;
+}}
+QPushButton[variant="nav"]:disabled {{ color: {p['text_faint']}; }}
+
+/* ═══ Checkbox ═══════════════════════════════════════════════════════════════
+   El indicador se deja al estilo nativo: al pintarle un fondo propio, Qt
+   deja de dibujar el tilde y queda un cuadrado lleno, ambiguo. El color de
+   marcado sale de la QPalette (Highlight = primary).                        */
 QCheckBox {{
     spacing: 8px;
     color: {p['text']};
     font-size: {f['body']}px;
     background: transparent;
 }}
-/* El indicador se deja al estilo nativo: al pintarle un fondo propio,
-   Qt deja de dibujar el tilde y quedaba un cuadrado lleno, ambiguo.
-   El color de marcado sale de la QPalette (Highlight = primary). */
 QCheckBox::indicator {{
     width: 16px;
     height: 16px;
@@ -460,12 +574,13 @@ QFrame#cardAcento {{
     border-radius: {r['lg']}px;
 }}
 QFrame#panelActivo {{
-    background-color: {p['primary_soft']};
-    border: 1px solid {p['primary_hl']};
-    border-radius: {r['xl']}px;
+    background-color: {p['surface']};
+    border: 1px solid {p['border_soft']};
+    border-left: 3px solid {p['primary']};
+    border-radius: {r['lg']}px;
 }}
 QFrame#panelVacio {{
-    background-color: {p['surface']};
+    background-color: transparent;
     border: 1px dashed {p['border']};
     border-radius: {r['xl']}px;
 }}
@@ -478,6 +593,54 @@ QFrame#barraInferior {{
     background-color: {p['surface']};
     border: none;
     border-top: 1px solid {p['border_soft']};
+}}
+QFrame#separadorV {{
+    background-color: {p['border_soft']};
+    max-width: 1px;
+    border: none;
+}}
+
+/* ═══ Barra lateral (menú de herramientas) ═══════════════════════════════════ */
+QWidget#barraLateral {{
+    background-color: {p['sidebar']};
+    border-right: 1px solid {p['border_soft']};
+}}
+QFrame#marca {{
+    background: transparent;
+    border: none;
+}}
+QLabel#marcaTitulo {{
+    font-size: {f['h3']}px;
+    font-weight: 700;
+    color: {p['text']};
+    letter-spacing: -0.2px;
+}}
+QLabel#marcaVersion {{
+    font-size: {f['micro']}px;
+    color: {p['text_faint']};
+}}
+
+/* ═══ Tarjeta de herramienta (launcher) ══════════════════════════════════════ */
+QFrame#tarjetaHerramienta {{
+    background-color: {p['surface']};
+    border: 1px solid {p['border_soft']};
+    border-radius: {r['xl']}px;
+}}
+QFrame#tarjetaHerramienta:hover {{
+    border-color: {p['primary']};
+    background-color: {p['surface']};
+}}
+QFrame#tarjetaHerramienta[activa="true"] {{
+    border-color: {p['primary']};
+}}
+QFrame#tarjetaHerramienta[proximamente="true"] {{
+    background-color: transparent;
+    border: 1px dashed {p['border']};
+}}
+QFrame#insigniaIcono {{
+    background-color: {p['primary_soft']};
+    border: none;
+    border-radius: {r['lg']}px;
 }}
 
 /* ═══ Zona de drag & drop ════════════════════════════════════════════════════ */
@@ -498,8 +661,7 @@ QFrame#tarjetaPagina {{
     border-radius: {r['lg']}px;
 }}
 QFrame#tarjetaPagina:hover {{
-    border-color: {p['primary']};
-    background-color: {p['surface_2']};
+    border-color: {p['primary_hl']};
 }}
 QFrame#tarjetaPagina[activa="true"] {{
     background-color: {p['primary_soft']};
@@ -511,6 +673,33 @@ QFrame#tarjetaPagina:focus {{
 QLabel#lienzoPagina {{
     background-color: {p['surface_3']};
     border-radius: {r['sm']}px;
+}}
+
+/* ═══ Fila de página escaneada ═══════════════════════════════════════════════ */
+QFrame#filaPagina {{
+    background-color: {p['surface']};
+    border: 1px solid {p['border_soft']};
+    border-radius: {r['lg']}px;
+}}
+QFrame#filaPagina:hover {{
+    border-color: {p['border_fuerte']};
+}}
+QFrame#filaPagina[activa="true"] {{
+    border-color: {p['primary']};
+    background-color: {p['primary_soft']};
+}}
+QLabel#miniatura {{
+    background-color: {p['surface_3']};
+    border: 1px solid {p['border_soft']};
+    border-radius: {r['sm']}px;
+}}
+QLabel#numeroPagina {{
+    background-color: {p['surface_3']};
+    color: {p['text_muted']};
+    border-radius: {r['sm']}px;
+    font-size: {f['micro']}px;
+    font-weight: 700;
+    padding: 3px 7px;
 }}
 
 /* ═══ Lista de guardados ═════════════════════════════════════════════════════ */
@@ -529,12 +718,11 @@ QListWidget::item {{
     border: 1px solid transparent;
 }}
 QListWidget::item:hover {{
-    background-color: {p['surface_hover']};
-    border-color: {p['border_soft']};
+    background-color: {p['surface_2']};
 }}
 QListWidget::item:selected {{
     background-color: {p['primary_soft']};
-    border-color: {p['primary']};
+    border-color: {p['primary_hl']};
     color: {p['text']};
 }}
 
@@ -550,12 +738,13 @@ QFrame[frameShape="4"], QFrame[frameShape="5"] {{
 QProgressBar {{
     background: {p['surface_3']};
     border: none;
-    border-radius: 5px;
-    max-height: 8px;
+    border-radius: 4px;
+    max-height: 7px;
+    text-align: center;
 }}
 QProgressBar::chunk {{
     background: {p['primary']};
-    border-radius: 5px;
+    border-radius: 4px;
 }}
 
 /* ═══ Labels con rol ═════════════════════════════════════════════════════════
@@ -564,7 +753,13 @@ QLabel#seccion, QLabel[rol="seccion"] {{
     font-size: {f['micro']}px;
     font-weight: 700;
     color: {p['text_faint']};
-    letter-spacing: 1.4px;
+    letter-spacing: 1.2px;
+}}
+QLabel[rol="display"] {{
+    font-size: {f['display']}px;
+    font-weight: 700;
+    color: {p['text']};
+    letter-spacing: -0.6px;
 }}
 QLabel#appTitle, QLabel[rol="titulo"] {{
     font-size: {f['h1']}px;
@@ -573,7 +768,7 @@ QLabel#appTitle, QLabel[rol="titulo"] {{
     letter-spacing: -0.3px;
 }}
 QLabel[rol="tituloBarra"] {{
-    font-size: {f['lead']}px;
+    font-size: {f['h3']}px;
     font-weight: 600;
     color: {p['text']};
 }}
@@ -593,7 +788,7 @@ QLabel[rol="cuerpo"] {{
 QLabel[rol="ok"] {{
     font-size: {f['body']}px;
     font-weight: 600;
-    color: {p['primary']};
+    color: {p['success']};
 }}
 QLabel[rol="error"] {{
     font-size: {f['small']}px;
@@ -608,6 +803,61 @@ QLabel[rol="badge"] {{
     border-radius: {r['sm']}px;
     padding: 6px 10px;
 }}
+
+/* ═══ Chips de estado ════════════════════════════════════════════════════════
+   Píldora chica con icono + texto. tono = neutro|ok|warn|err|info|primary   */
+QFrame#chip {{
+    border-radius: {r['sm']}px;
+    border: 1px solid {p['border_soft']};
+    background-color: {p['surface_2']};
+}}
+QFrame#chip QLabel {{
+    font-size: {f['micro']}px;
+    font-weight: 600;
+    color: {p['text_muted']};
+}}
+QFrame#chip[tono="ok"] {{
+    background-color: {p['success_soft']};
+    border-color: transparent;
+}}
+QFrame#chip[tono="ok"] QLabel      {{ color: {p['success']}; }}
+QFrame#chip[tono="warn"] {{
+    background-color: {p['warning_soft']};
+    border-color: transparent;
+}}
+QFrame#chip[tono="warn"] QLabel    {{ color: {p['warning']}; }}
+QFrame#chip[tono="err"] {{
+    background-color: {p['danger_soft']};
+    border-color: transparent;
+}}
+QFrame#chip[tono="err"] QLabel     {{ color: {p['danger']}; }}
+QFrame#chip[tono="info"] {{
+    background-color: {p['info_soft']};
+    border-color: transparent;
+}}
+QFrame#chip[tono="info"] QLabel    {{ color: {p['info']}; }}
+QFrame#chip[tono="primary"] {{
+    background-color: {p['primary_soft']};
+    border-color: transparent;
+}}
+QFrame#chip[tono="primary"] QLabel {{ color: {p['primary']}; }}
+
+/* ═══ Avisos en línea ════════════════════════════════════════════════════════ */
+QFrame#aviso {{
+    border-radius: {r['md']}px;
+    border: 1px solid {p['border_soft']};
+    background-color: {p['surface_2']};
+}}
+QFrame#aviso[tono="ok"]      {{ background-color: {p['success_soft']};
+                                border-color: transparent; }}
+QFrame#aviso[tono="warn"]    {{ background-color: {p['warning_soft']};
+                                border-color: transparent; }}
+QFrame#aviso[tono="err"]     {{ background-color: {p['danger_soft']};
+                                border-color: transparent; }}
+QFrame#aviso[tono="info"]    {{ background-color: {p['info_soft']};
+                                border-color: transparent; }}
+QFrame#aviso[tono="primary"] {{ background-color: {p['primary_soft']};
+                                border-color: transparent; }}
 
 /* ═══ Status bar ════════════════════════════════════════════════════════════ */
 QStatusBar {{
@@ -685,6 +935,15 @@ def apply_theme(app: QApplication, mode: str = "light") -> None:
 
     THEME.clear()
     THEME.update(palette)
+
+    # Los iconos llevan el color quemado en el pixmap: si no se tira el
+    # cache, tras cambiar de tema quedarían del color anterior.
+    try:
+        from modules.iconos import limpiar_cache
+
+        limpiar_cache()
+    except ImportError:                                # pragma: no cover
+        pass
 
     app.setPalette(_build_palette(palette))
     app.setStyleSheet(_build_stylesheet(palette))

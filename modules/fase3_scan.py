@@ -35,11 +35,9 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
-import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -53,87 +51,35 @@ from PyQt6.QtWidgets import (
 
 from modules.dispositivos import (
     ErrorDispositivo,
-    adquirir_imagen,
-    com_inicializado,
-    es_cancelacion_usuario,
-    interpretar_error_wia,
     listar_escaneres,
     verificar_escaneo_disponible,
 )
+from modules.escaner_qt import _WORKERS_VIVOS, WIAScanWorker
 from modules.theme import SIZE, SPACE, repolish, theme_signals
 from modules.trabajo import TrabajoFirma
 from modules.ui import (
     AreaScroll,
+    Aviso,
     BarraInferior,
     BarraSuperior,
     FilaAdaptable,
+    IconoLabel,
     boton,
+    boton_icono,
     etiqueta,
+    icono_label,
     tarjeta,
 )
 
 EXTENSIONES_IMG = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp")
 FILTRO_IMG = "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp)"
-PREFIJO_TEMP = "pdf_sign_scan_"
-
-# Los workers WIA se registran acá para que sigan vivos aunque la vista
-# se cierre: destruir un QThread en ejecución revienta el proceso.
-_WORKERS_VIVOS: set[QThread] = set()
 
 log = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────────────────
-#  Worker: lanza el diálogo WIA en hilo aparte
-# ─────────────────────────────────────────────────────────────────────────
-class WIAScanWorker(QThread):
-    """Abre el diálogo de digitalización de WIA en un hilo aparte.
-
-    Puntos delicados que resuelve:
-      * COM se inicializa EN ESTE HILO. pywin32 no lo hace solo, y sin
-        eso toda llamada falla con "CoInitialize has not been called".
-        El usuario veía un error genérico del escáner y salía a revisar
-        cables, cuando el problema era del código.
-      * Los com_error se traducen a mensajes con causa y sugerencia.
-      * Si hay más de un escáner, se le deja elegir.
-    """
-
-    scan_completado = pyqtSignal(str)
-    scan_cancelado  = pyqtSignal()
-    scan_error      = pyqtSignal(object)    # ErrorDispositivo
-
-    # DPI objetivo. 300 alcanza para documentos simples; 600 se recomienda
-    # cuando hay sellos húmedos o firmas con detalle fino.
-    DPI_SCAN = 600
-
-    def __init__(self, elegir_dispositivo: bool = False, parent=None):
-        super().__init__(parent)
-        self._elegir_dispositivo = elegir_dispositivo
-
-    def run(self):
-        nombre = f"{PREFIJO_TEMP}{uuid.uuid4().hex[:8]}.png"
-        ruta_destino = os.path.join(tempfile.gettempdir(), nombre)
-        try:
-            # COM se inicializa EN ESTE HILO: sin esto, toda llamada WIA
-            # falla con "CoInitialize has not been called".
-            with com_inicializado() as ok:
-                if not ok:
-                    raise ErrorDispositivo(
-                        "No se pudieron cargar los componentes de Windows "
-                        "para escanear.",
-                        sugerencia="Instalalos con:  pip install pywin32")
-
-                adquirir_imagen(ruta_destino, dpi=self.DPI_SCAN,
-                                elegir_dispositivo=self._elegir_dispositivo)
-                self.scan_completado.emit(ruta_destino)
-
-        except ErrorDispositivo as e:
-            self.scan_error.emit(e)
-        except Exception as e:                       # noqa: BLE001
-            if es_cancelacion_usuario(e):
-                self.scan_cancelado.emit()
-            else:
-                self.scan_error.emit(interpretar_error_wia(e))
+# El worker de escaneo vive en modules/escaner_qt.py: lo comparten esta
+# fase y la herramienta "Escanear a PDF". Se re-exporta para no romper
+# los imports que ya lo tomaban desde acá.
+__all__ = ["FilaPagina", "VistaEscaneo", "WIAScanWorker", "ZonaDrop"]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -153,9 +99,8 @@ class ZonaDrop(QFrame):
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.setSpacing(SPACE["xs"])
 
-        self.lbl_icono = etiqueta("⬇", rol="hint", align=Qt.AlignmentFlag.AlignCenter)
-        self.lbl_icono.setStyleSheet("font-size: 22px;")
-        lay.addWidget(self.lbl_icono)
+        lay.addWidget(icono_label("abajo", 26, color="text_faint"), 0,
+                      Qt.AlignmentFlag.AlignCenter)
 
         self.lbl_texto = etiqueta(
             "Arrastrá acá las imágenes escaneadas\n"
@@ -224,34 +169,44 @@ class FilaPagina(QFrame):
         col = QVBoxLayout()
         col.setSpacing(2)
         col.addWidget(etiqueta(f"Página {pagina + 1}", rol="subtitulo"))
+
+        fila_estado = QHBoxLayout()
+        fila_estado.setSpacing(SPACE["xs"] + 2)
+        self.icono_estado = IconoLabel("reloj", 14, color="text_faint")
+        fila_estado.addWidget(self.icono_estado)
         self.lbl_estado = etiqueta("Pendiente de escaneo", rol="hint")
-        col.addWidget(self.lbl_estado)
+        fila_estado.addWidget(self.lbl_estado, 1)
+        col.addLayout(fila_estado)
+
         self.lbl_aviso = etiqueta("", rol="error", wrap=True)
         self.lbl_aviso.hide()
         col.addWidget(self.lbl_aviso)
         col.addStretch()
         lay.addLayout(col, 1)
 
-        # Etiquetas de texto en vez de glifos de flecha circular (⟲/⟳):
-        # esos caracteres no están en todas las fuentes y salían como
-        # cuadraditos vacíos. "−90°/+90°" se lee igual en cualquier equipo.
-        self.btn_rotar_izq = boton("-90°", variant="ghost", fixed_w=52,
-                                   height=SIZE["btn_sm"], compacto=True,
-                                   tooltip="Rotar 90° a la izquierda",
-                                   on_click=lambda: self.rotar_pedido.emit(self.pagina, -90))
-        self.btn_rotar_der = boton("+90°", variant="ghost", fixed_w=52,
-                                   height=SIZE["btn_sm"], compacto=True,
-                                   tooltip="Rotar 90° a la derecha",
-                                   on_click=lambda: self.rotar_pedido.emit(self.pagina, 90))
-        self.btn_quitar = boton("Quitar", variant="ghost",
-                                height=SIZE["btn_sm"], compacto=True,
-                                tooltip="Quitar la imagen de esta página",
-                                on_click=lambda: self.quitar_pedido.emit(self.pagina))
-        self.btn_digitalizar = boton("Digitalizar", variant="secondary",
+        # Rotar y quitar pasan a ser iconos: al lado de "Digitalizar" y
+        # "Cargar…", cinco botones con texto amontonaban la fila y la
+        # dejaban ilegible en ventanas angostas.
+        self.btn_rotar_izq = boton_icono(
+            "rotar-izq", tooltip="Rotar 90° a la izquierda",
+            lado=SIZE["btn_sm"], tamano_icono=15,
+            on_click=lambda: self.rotar_pedido.emit(self.pagina, -90))
+        self.btn_rotar_der = boton_icono(
+            "rotar-der", tooltip="Rotar 90° a la derecha",
+            lado=SIZE["btn_sm"], tamano_icono=15,
+            on_click=lambda: self.rotar_pedido.emit(self.pagina, 90))
+        self.btn_quitar = boton_icono(
+            "basura", tooltip="Quitar la imagen de esta página",
+            lado=SIZE["btn_sm"], tamano_icono=15,
+            on_click=lambda: self.quitar_pedido.emit(self.pagina))
+        self.btn_quitar.setProperty("danger", "true")
+        repolish(self.btn_quitar)
+        self.btn_digitalizar = boton("Digitalizar", icono="escaner",
+                                     variant="secondary",
                                      height=SIZE["btn_sm"],
                                      tooltip="Escanear la hoja firmada de esta página",
                                      on_click=lambda: self.digitalizar_pedido.emit(self.pagina))
-        self.btn_cargar = boton("Cargar…", variant="ghost",
+        self.btn_cargar = boton("Cargar…", icono="imagen", variant="ghost",
                                 height=SIZE["btn_sm"],
                                 tooltip="Elegir un archivo de imagen para esta página",
                                 on_click=lambda: self.cargar_pedido.emit(self.pagina))
@@ -278,6 +233,8 @@ class FilaPagina(QFrame):
             self.lbl_estado.setText("Pendiente de escaneo")
             self.lbl_estado.setProperty("rol", "hint")
             repolish(self.lbl_estado)
+            self.icono_estado.set_icono("reloj", color="text_faint")
+            self.icono_estado.setVisible(True)
             self.lbl_aviso.hide()
             self.setProperty("objectName", "card")
             return
@@ -294,15 +251,17 @@ class FilaPagina(QFrame):
 
         nombre = os.path.basename(ruta)
         sufijo = f"  ·  rotada {rotacion}°" if rotacion else ""
-        self.lbl_estado.setText(f"✔  {nombre}{sufijo}")
+        self.lbl_estado.setText(f"{nombre}{sufijo}")
         self.lbl_estado.setProperty("rol", "ok")
         repolish(self.lbl_estado)
+        self.icono_estado.set_icono("check-circulo", color="success")
+        self.icono_estado.setVisible(True)
 
     def _evaluar_orientacion(self, pm: QPixmap):
         """Avisa si la imagen y la página tienen orientaciones opuestas.
 
         No bloquea nada: es casi siempre un escaneo al revés, y con un
-        clic en ⟳ se arregla.
+        clic en "+90°" se arregla.
         """
         if pm.width() <= 0:
             self.lbl_aviso.hide()
@@ -312,7 +271,7 @@ class FilaPagina(QFrame):
         pag_vertical = self.ratio_pagina >= 1
         if img_vertical != pag_vertical:
             self.lbl_aviso.setText(
-                "⚠  La orientación no coincide con la página — probá rotarla.")
+                "La orientación no coincide con la página — probá rotarla.")
             self.lbl_aviso.show()
         else:
             self.lbl_aviso.hide()
@@ -324,6 +283,8 @@ class FilaPagina(QFrame):
             self.lbl_estado.setText("Escaneando…")
             self.lbl_estado.setProperty("rol", "ok")
             repolish(self.lbl_estado)
+            self.icono_estado.set_icono("escaner", color="primary")
+            self.icono_estado.setVisible(True)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -385,7 +346,8 @@ class VistaEscaneo(QWidget):
         self.cabecera = BarraSuperior(
             f"Escanear  ·  {cantidad} página{plural} "
             f"({self.trabajo.etiqueta_paginas()})  ·  {nombre}")
-        self.cabecera.agregar(boton("←  Volver a páginas", variant="ghost",
+        self.cabecera.agregar(boton("Volver a páginas", variant="ghost",
+                                    icono="chevron-izq",
                                     tooltip="Volver al listado de páginas (Esc)",
                                     on_click=self.cancelar.emit))
         raiz.addWidget(self.cabecera)
@@ -400,19 +362,21 @@ class VistaEscaneo(QWidget):
             "Podés hacerlo en cualquier orden.",
             rol="cuerpo", wrap=True))
 
-        lay.addWidget(etiqueta(
-            f"💡  El escaneo WIA se hace en color a {WIAScanWorker.DPI_SCAN} DPI "
+        lay.addWidget(Aviso(
+            f"El escaneo WIA se hace en color a {WIAScanWorker.DPI_SCAN} DPI "
             "(máxima calidad). Podés ajustarlo en el diálogo del escáner.",
-            rol="badge", wrap=True))
+            tono="info", icono_nombre="bombilla"))
 
         # Acciones globales
         acciones = FilaAdaptable(breakpoint_px=560, spacing=SPACE["sm"])
         self.btn_siguiente = boton("Digitalizar siguiente pendiente",
+                                   icono="escaner",
                                    min_w=230,
                                    tooltip="Escanea la próxima página sin imagen",
                                    on_click=self._digitalizar_siguiente)
         acciones.agregar(self.btn_siguiente)
-        acciones.agregar(boton("Cargar imágenes…", variant="secondary",
+        acciones.agregar(boton("Cargar imágenes…", icono="imagen",
+                               variant="secondary",
                                tooltip="Elegí uno o varios archivos; se reparten "
                                        "entre las páginas pendientes",
                                on_click=self._cargar_varias))
@@ -439,7 +403,8 @@ class VistaEscaneo(QWidget):
         raiz.addWidget(cuerpo, 1)
 
         self.pie = BarraInferior("")
-        self.btn_usar = boton("Continuar  →", height=SIZE["btn_lg"],
+        self.btn_usar = boton("Continuar", icono="flecha-der",
+                              height=SIZE["btn_lg"],
                               enabled=False, on_click=self._on_continuar)
         self.pie.agregar(self.btn_usar)
         raiz.addWidget(self.pie)
@@ -455,8 +420,8 @@ class VistaEscaneo(QWidget):
         self.btn_siguiente.setEnabled(bool(pendientes))
 
         if completo:
-            self.pie.set_estado(
-                f"✔  {self.trabajo.descripcion_progreso()}", rol="ok")
+            self.pie.set_estado(self.trabajo.descripcion_progreso(),
+                                rol="ok", tono="ok")
         else:
             from modules.trabajo import formatear_paginas
             self.pie.set_estado(

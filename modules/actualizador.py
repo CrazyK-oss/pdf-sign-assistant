@@ -39,7 +39,14 @@ from modules.actualizaciones import (
     toca_comprobar,
 )
 from modules.theme import SIZE, SPACE, repolish
-from modules.ui import FilaAdaptable, abrir_en_sistema, boton, etiqueta, separador
+from modules.ui import (
+    FilaAdaptable,
+    abrir_en_sistema,
+    boton,
+    etiqueta,
+    icono_label,
+    separador,
+)
 from modules.version import __version__
 
 log = logging.getLogger(__name__)
@@ -138,9 +145,8 @@ class DialogoActualizacion(QDialog):
         lay.setSpacing(SPACE["sm"])
 
         fila = QHBoxLayout()
-        icono = etiqueta("🎉")
-        icono.setStyleSheet("font-size: 22px;")
-        fila.addWidget(icono)
+        fila.addWidget(icono_label("chispa", SIZE["icono_lg"],
+                                   color="primary"))
         fila.addWidget(etiqueta("Hay una versión nueva", rol="titulo"))
         fila.addStretch()
         lay.addLayout(fila)
@@ -258,7 +264,7 @@ class DialogoActualizacion(QDialog):
 
     def _on_error(self, mensaje: str):
         self.barra.hide()
-        self.lbl_estado.setText(f"⚠  {mensaje}")
+        self.lbl_estado.setText(mensaje)
         self.lbl_estado.setProperty("rol", "error")
         repolish(self.lbl_estado)
         self.btn_principal.setEnabled(True)

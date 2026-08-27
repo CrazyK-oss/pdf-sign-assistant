@@ -1,23 +1,34 @@
 """
 PDF Sign Assistant — main.py
 ============================================================
-Flujo principal:
-  1. Pantalla de inicio: botón "Abrir PDF" + lista de trabajos guardados.
-  2. Panel activo cuando hay un PDF en trabajo (cancelar / trabajar páginas).
-  3. El panel activo delega a:
-       fase1_preview → fase2_print → fase3_scan → fase_guardar
-  4. Al confirmar se añade a la lista de guardados (con fecha/hora).
+La ventana principal es un contenedor de herramientas.
+
+  BarraLateral            menú permanente (modules/navegacion.py)
+  PantallaInicio          el launcher, con una tarjeta por herramienta
+  Herramienta "Firmar"    el flujo completo, que vive en esta ventana
+  Herramienta "Escanear"  modules/herramienta_escaneo.py
+
+Flujo de la herramienta de firma (el de siempre):
+  1. Abrir PDF → se copia a la carpeta de trabajo.
+  2. Panel del PDF activo (elegir páginas / cancelar).
+  3. fase1_preview → fase2_print → fase3_scan → fase_guardar
+  4. Al confirmar, el documento se suma a la lista de guardados.
   5. Doble clic en un guardado → lo reabre para re-editar.
-  6. Seleccionar un guardado → habilita Editar y Enviar correo.
-  7. ⚙ → DialogoAjustes (correo emisor).
-  8. 🌙 / ☀ → alterna modo claro y oscuro (queda guardado en config.json).
-  9. 📂 → abre la carpeta de documentos firmados.
- 10. closeEvent → limpia _envio_temp/ antes de salir.
+  6. Seleccionarlo → habilita Editar y Enviar por correo.
 
 Atajos de teclado:
-  Ctrl+O  abrir PDF          Ctrl+F  buscar en guardados
-  Ctrl+E  enviar por correo  Ctrl+D  alternar tema
-  F5      recargar lista     Enter   editar el seleccionado
+  Ctrl+0  inicio             Ctrl+O  abrir PDF
+  Ctrl+1  firmar un PDF      Ctrl+E  enviar por correo
+  Ctrl+2  escanear a PDF     Ctrl+D  alternar tema
+  Ctrl+F  buscar             F5      recargar la lista
+  Enter   editar el documento seleccionado
+
+Sin emojis
+----------
+Toda la iconografía sale de modules/iconos.py, que dibuja SVG. Los
+emojis dependían de que la fuente instalada tuviera el glifo, y en
+Windows eso fallaba de forma distinta en cada máquina: ⚙ se veía, 👁
+salía como una raya y 🌙 como un punto.
 
 NOTA PyInstaller:
   - Instalar dependencias antes de buildear:  pip install -r requirements.txt
@@ -49,13 +60,10 @@ from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
-    QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QSizePolicy,
     QStackedWidget,
     QStatusBar,
     QStyle,
@@ -71,8 +79,10 @@ try:
 except Exception:
     pass
 
+from modules import iconos
 from modules.errores import instalar as instalar_manejador_errores
 from modules.fase1_preview import VistaPrevisualizacion
+from modules.navegacion import CATALOGO, INICIO, BarraLateral, PantallaInicio
 from modules.setup import (
     BASE_DIR,
     CARPETA_FIRMADO,
@@ -84,14 +94,16 @@ from modules.setup import (
     limpiar_trabajos_huerfanos,
     setup_directories,
 )
-from modules.theme import SPACE, THEME, apply_theme, current_mode
+from modules.theme import BREAKPOINT, SIZE, SPACE, THEME, apply_theme, current_mode
 from modules.trabajo import TrabajoFirma
 from modules.ui import (
+    BarraSuperior,
+    Buscador,
     FilaAdaptable,
     abrir_en_sistema,
     boton,
     etiqueta,
-    separador,
+    icono_label,
     tarjeta,
 )
 from modules.version import APP_NOMBRE, __version__
@@ -112,17 +124,14 @@ except Exception:
 def _panel_activo(ruta: Path, total_paginas: int,
                   on_trabajar, on_cancelar) -> QWidget:
     """Tarjeta con el PDF en curso y sus dos acciones."""
-    panel, lay = tarjeta(acento=True, padding=SPACE["lg"], spacing=SPACE["md"])
+    panel, lay = tarjeta(padding=SPACE["lg"], spacing=SPACE["md"])
     panel.setObjectName("panelActivo")
 
     fila_info = QHBoxLayout()
     fila_info.setSpacing(SPACE["md"])
 
-    icono = etiqueta("📄")
-    icono.setStyleSheet("font-size: 22px;")
-    icono.setFixedWidth(32)
-    icono.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-    fila_info.addWidget(icono)
+    icono = icono_label("documento-texto", SIZE["icono_md"], color="primary")
+    fila_info.addWidget(icono, 0, Qt.AlignmentFlag.AlignTop)
 
     col = QVBoxLayout()
     col.setSpacing(2)
@@ -137,11 +146,11 @@ def _panel_activo(ruta: Path, total_paginas: int,
     lay.addLayout(fila_info)
 
     acciones = FilaAdaptable(breakpoint_px=440, spacing=SPACE["sm"])
-    acciones.agregar(boton("Elegir páginas  →", min_w=190, height=40,
-                           on_click=on_trabajar))
+    acciones.agregar(boton("Elegir páginas", icono="flecha-der", min_w=180,
+                           height=SIZE["btn_lg"], on_click=on_trabajar))
     acciones.agregar_stretch()
-    acciones.agregar(boton("✕  Cancelar", variant="danger", height=40,
-                           on_click=on_cancelar))
+    acciones.agregar(boton("Cancelar", variant="ghost", icono="cerrar",
+                           height=SIZE["btn_lg"], on_click=on_cancelar))
     lay.addWidget(acciones)
     return panel
 
@@ -166,14 +175,17 @@ class ItemGuardado(QListWidgetItem):
         self.setText(f"{ruta.name}\n{fecha}")
         self.setData(ROL_NOMBRE, ruta.name)
         self.setData(ROL_FECHA, fecha)
-        self.setSizeHint(QSize(0, 54))
+        self.setSizeHint(QSize(0, 58))
         self.setToolTip(str(ruta))
 
 
 class _DelegadoDocumento(QStyledItemDelegate):
-    """Dibuja cada fila con jerarquía: nombre en primer plano y fecha
-    atenuada debajo. Con el texto por defecto de QListWidget ambas
+    """Dibuja cada fila con jerarquía: icono, nombre en primer plano y
+    fecha atenuada debajo. Con el texto por defecto de QListWidget ambas
     líneas salían con el mismo peso y tamaño."""
+
+    ICONO = 18
+    SANGRIA = 34        # ancho reservado al icono, incluido su margen
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
@@ -187,18 +199,27 @@ class _DelegadoDocumento(QStyledItemDelegate):
         nombre = index.data(ROL_NOMBRE) or ""
         fecha = index.data(ROL_FECHA) or ""
         rect = opt.rect.adjusted(SPACE["md"], SPACE["sm"], -SPACE["md"], -SPACE["sm"])
-        mitad = rect.height() // 2
 
         painter.save()
+
+        pm = iconos.pixmap("documento-firmado", self.ICONO, color="primary")
+        painter.drawPixmap(
+            rect.left(),
+            rect.top() + (rect.height() - self.ICONO) // 2,
+            pm)
+
+        texto = rect.adjusted(self.SANGRIA, 0, 0, 0)
+        mitad = texto.height() // 2
+
         fuente = QFont(opt.font)
         fuente.setWeight(QFont.Weight.DemiBold)
         painter.setFont(fuente)
         painter.setPen(QColor(THEME["text"]))
         metricas = QFontMetrics(fuente)
         painter.drawText(
-            QRect(rect.left(), rect.top(), rect.width(), mitad),
+            QRect(texto.left(), texto.top(), texto.width(), mitad),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            metricas.elidedText(nombre, Qt.TextElideMode.ElideMiddle, rect.width()),
+            metricas.elidedText(nombre, Qt.TextElideMode.ElideMiddle, texto.width()),
         )
 
         # El tema define los tamaños en px vía QSS, así que pointSizeF()
@@ -211,7 +232,7 @@ class _DelegadoDocumento(QStyledItemDelegate):
         painter.setFont(fuente_fecha)
         painter.setPen(QColor(THEME["text_muted"]))
         painter.drawText(
-            QRect(rect.left(), rect.top() + mitad, rect.width(), mitad),
+            QRect(texto.left(), texto.top() + mitad, texto.width(), mitad),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             fecha,
         )
@@ -226,8 +247,8 @@ class VentanaPrincipal(QMainWindow):
         self.setWindowTitle(f"{APP_NOMBRE}  v{__version__}")
         # Mínimo chico a propósito: la UI se adapta y no obliga a tener
         # una pantalla grande.
-        self.setMinimumSize(460, 420)
-        self.resize(880, 660)
+        self.setMinimumSize(520, 460)
+        self.resize(1100, 720)
 
         self.config = cargar_config()
         # Todo el estado del trabajo en curso vive en TrabajoFirma
@@ -235,12 +256,16 @@ class VentanaPrincipal(QMainWindow):
         self._vista_preview = None
         self._vista_escaneo = None
         self._vista_guardar = None
+        self._herramienta_escaneo = None      # se crea al usarla por primera vez
+        self._paginas: dict[str, QWidget] = {}
+        self._actual = INICIO
 
         self._worker_update = None
         self._build_ui()
         self._registrar_atajos()
         self._recargar_guardados()
         self._vigilar_carpeta()
+        self._ir_a(INICIO)
 
         # Comprobación diferida: que la ventana abra primero. Buscar
         # actualizaciones nunca debe retrasar el arranque.
@@ -248,76 +273,126 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Cierre de la app ──────────────────────────────────────────────────
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        """Limpia la carpeta temporal de envíos y cierra las vistas abiertas."""
+        """Limpia las carpetas temporales y cierra las vistas abiertas."""
         try:
             from modules.fase4_email import limpiar_temp_al_salir
             limpiar_temp_al_salir(CARPETA_FIRMADO)
         except Exception:
             pass
+        if self._herramienta_escaneo is not None:
+            self._herramienta_escaneo.limpiar_temporales()
         self._cerrar_vistas_abiertas()
         super().closeEvent(event)
 
-    # ── Construcción de UI ────────────────────────────────────────────────
+    # ── Construcción de la ventana ────────────────────────────────────────
     def _build_ui(self):
         central = QWidget()
         central.setObjectName("pantalla")
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["md"])
-        root.setSpacing(SPACE["md"])
 
-        root.addWidget(self._construir_header())
-        root.addWidget(separador())
+        raiz = QHBoxLayout(central)
+        raiz.setContentsMargins(0, 0, 0, 0)
+        raiz.setSpacing(0)
+
+        self.barra_lateral = BarraLateral(__version__)
+        self.barra_lateral.herramienta_elegida.connect(self._ir_a)
+        self.barra_lateral.accion.connect(self._accion_lateral)
+        raiz.addWidget(self.barra_lateral)
+
+        self.paginas = QStackedWidget()
+        raiz.addWidget(self.paginas, 1)
+
+        self.pantalla_inicio = PantallaInicio()
+        self.pantalla_inicio.herramienta_elegida.connect(self._ir_a)
+        self.pantalla_inicio.abrir_carpeta.connect(self._abrir_carpeta_firmados)
+        self.pantalla_inicio.abrir_documento.connect(abrir_en_sistema)
+        self._registrar_pagina(INICIO, self.pantalla_inicio)
+
+        self._registrar_pagina("firmar", self._construir_pagina_firmar())
+
+        self.status = QStatusBar()
+        self.setStatusBar(self.status)
+        self.status.showMessage("Listo — elegí una herramienta para empezar.")
+
+    def _registrar_pagina(self, clave: str, widget: QWidget) -> QWidget:
+        self._paginas[clave] = widget
+        self.paginas.addWidget(widget)
+        return widget
+
+    # ── Navegación ────────────────────────────────────────────────────────
+    def _ir_a(self, destino: str) -> None:
+        pagina = self._paginas.get(destino) or self._crear_pagina(destino)
+        if pagina is None:
+            return
+        self._actual = destino
+        self.paginas.setCurrentWidget(pagina)
+        self.barra_lateral.set_activa(destino)
+        if destino == INICIO:
+            self._actualizar_inicio()
+
+    def _crear_pagina(self, destino: str) -> QWidget | None:
+        """Construye una herramienta la primera vez que se abre.
+
+        La de escaneo consulta el escáner al armarse, y hacerlo durante el
+        arranque retrasaría la ventana por algo que quizás nunca se use.
+        """
+        if destino != "escanear":
+            return None
+
+        from modules.herramienta_escaneo import VistaEscanearAPdf
+
+        vista = VistaEscanearAPdf(CARPETA_FIRMADO)
+        vista.volver.connect(lambda: self._ir_a(INICIO))
+        vista.documento_guardado.connect(self._on_pdf_escaneado)
+        self._herramienta_escaneo = vista
+        return self._registrar_pagina(destino, vista)
+
+    def _accion_lateral(self, clave: str) -> None:
+        if clave == "tema":
+            self._toggle_tema()
+        elif clave == "ajustes":
+            self._abrir_ajustes()
+        elif clave == "carpeta":
+            self._abrir_carpeta_firmados()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Con la ventana angosta, 236 px de barra lateral son un tercio del
+        # ancho útil: se colapsa a la tira de iconos.
+        self.barra_lateral.set_compacta(self.width() < BREAKPOINT["md"])
+
+    # ── Herramienta: firmar un PDF ────────────────────────────────────────
+    def _construir_pagina_firmar(self) -> QWidget:
+        pagina = QWidget()
+        raiz = QVBoxLayout(pagina)
+        raiz.setContentsMargins(0, 0, 0, 0)
+        raiz.setSpacing(0)
+
+        cabecera = BarraSuperior("Firmar un PDF", icono_nombre="firma")
+        self.btn_abrir = boton("Abrir PDF", icono="mas", min_w=140,
+                               tooltip="Abrir un PDF para trabajar (Ctrl+O)",
+                               on_click=self.abrir_pdf)
+        cabecera.agregar(self.btn_abrir)
+        raiz.addWidget(cabecera)
+
+        cuerpo = QWidget()
+        lay = QVBoxLayout(cuerpo)
+        lay.setContentsMargins(SPACE["xl"], SPACE["lg"], SPACE["xl"], SPACE["md"])
+        lay.setSpacing(SPACE["md"])
 
         # Panel del PDF activo (oculto mientras no hay ninguno)
         self.panel_activo_container = QWidget()
         self.panel_activo_container.setVisible(False)
         self._lay_panel = QVBoxLayout(self.panel_activo_container)
         self._lay_panel.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self.panel_activo_container)
+        lay.addWidget(self.panel_activo_container)
 
-        root.addWidget(self._construir_encabezado_lista())
-        root.addWidget(self._construir_lista(), 1)
-        root.addWidget(self._construir_acciones())
+        lay.addWidget(self._construir_encabezado_lista())
+        lay.addWidget(self._construir_lista(), 1)
+        lay.addWidget(self._construir_acciones())
 
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
-        self.status.showMessage("Listo — abrí un PDF para comenzar.")
-
-    def _construir_header(self) -> QWidget:
-        header = FilaAdaptable(breakpoint_px=560, spacing=SPACE["sm"])
-
-        titulo = QWidget()
-        lay_t = QHBoxLayout(titulo)
-        lay_t.setContentsMargins(0, 0, 0, 0)
-        lay_t.setSpacing(SPACE["sm"])
-
-        self._dot = QLabel("●")
-        self._dot.setStyleSheet(f"color: {THEME['primary']}; font-size: 10px;")
-        self._dot.setFixedWidth(12)
-        lay_t.addWidget(self._dot)
-
-        lbl_titulo = etiqueta("PDF Sign Assistant", rol="titulo")
-        lbl_titulo.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                 QSizePolicy.Policy.Preferred)
-        lay_t.addWidget(lbl_titulo, 1)
-        header.agregar(titulo, 1)
-
-        oscuro = current_mode() == "dark"
-        self.btn_tema = boton("☀" if oscuro else "🌙", variant="ghost", fixed_w=42,
-                              tooltip="Cambiar tema (Ctrl+D)",
-                              on_click=self._toggle_tema)
-        header.agregar(self.btn_tema)
-
-        self.btn_ajustes = boton("⚙", variant="ghost", fixed_w=42,
-                                 tooltip="Ajustes", on_click=self._abrir_ajustes)
-        header.agregar(self.btn_ajustes)
-
-        self.btn_abrir = boton("＋  Abrir PDF", min_w=140,
-                               tooltip="Abrir un PDF para trabajar (Ctrl+O)",
-                               on_click=self.abrir_pdf)
-        header.agregar(self.btn_abrir)
-        return header
+        raiz.addWidget(cuerpo, 1)
+        return pagina
 
     def _construir_encabezado_lista(self) -> QWidget:
         fila = QWidget()
@@ -325,13 +400,11 @@ class VentanaPrincipal(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(SPACE["sm"])
 
-        lay.addWidget(etiqueta("TRABAJOS GUARDADOS", rol="seccion"))
+        lay.addWidget(etiqueta("DOCUMENTOS FIRMADOS", rol="seccion"))
         lay.addStretch()
 
-        self.input_buscar = QLineEdit()
-        self.input_buscar.setPlaceholderText("Buscar…")
-        self.input_buscar.setClearButtonEnabled(True)
-        self.input_buscar.setMaximumWidth(220)
+        self.input_buscar = Buscador("Buscar por nombre…")
+        self.input_buscar.setMaximumWidth(240)
         self.input_buscar.textChanged.connect(self._filtrar_lista)
         lay.addWidget(self.input_buscar)
 
@@ -357,9 +430,9 @@ class VentanaPrincipal(QMainWindow):
         self.panel_vacio, lay_v = tarjeta(padding=SPACE["xl"], spacing=SPACE["sm"])
         self.panel_vacio.setObjectName("panelVacio")
         lay_v.addStretch()
-        icono = etiqueta("📋", align=Qt.AlignmentFlag.AlignCenter)
-        icono.setStyleSheet("font-size: 30px;")
-        lay_v.addWidget(icono)
+        lay_v.addWidget(icono_label("documento-firmado", 44, color="text_faint"),
+                        0, Qt.AlignmentFlag.AlignCenter)
+        lay_v.addSpacing(SPACE["sm"])
         lay_v.addWidget(etiqueta("Sin documentos firmados todavía",
                                  rol="subtitulo",
                                  align=Qt.AlignmentFlag.AlignCenter))
@@ -374,40 +447,64 @@ class VentanaPrincipal(QMainWindow):
     def _construir_acciones(self) -> QWidget:
         acciones = FilaAdaptable(breakpoint_px=620, spacing=SPACE["sm"])
 
-        self.btn_reabrir = boton("✏️  Editar seleccionado", variant="secondary",
-                                 enabled=False, tooltip="Volver a firmar (Enter)",
+        self.btn_reabrir = boton("Editar seleccionado", variant="secondary",
+                                 icono="lapiz", enabled=False,
+                                 tooltip="Volver a firmar (Enter)",
                                  on_click=self._reabrir_desde_boton)
         acciones.agregar(self.btn_reabrir)
 
-        self.btn_email = boton("✉️  Enviar por correo", variant="secondary",
-                               enabled=False, tooltip="Enviar el documento (Ctrl+E)",
+        self.btn_email = boton("Enviar por correo", variant="secondary",
+                               icono="sobre", enabled=False,
+                               tooltip="Enviar el documento (Ctrl+E)",
                                on_click=self._enviar_correo)
         acciones.agregar(self.btn_email)
         acciones.agregar_stretch()
 
-        self.btn_carpeta = boton("📂  Abrir carpeta", variant="ghost",
+        self.btn_carpeta = boton("Abrir carpeta", variant="ghost",
+                                 icono="carpeta-abierta",
                                  tooltip=str(CARPETA_FIRMADO),
                                  on_click=self._abrir_carpeta_firmados)
         acciones.agregar(self.btn_carpeta)
         return acciones
 
     def _registrar_atajos(self):
+        pagina_firmar = self._paginas["firmar"]
+
+        # Navegación entre herramientas
+        atajos_nav = [("Ctrl+0", INICIO)]
+        for i, herramienta in enumerate(CATALOGO, start=1):
+            atajos_nav.append((f"Ctrl+{i}", herramienta.id))
+        for secuencia, destino in atajos_nav:
+            QShortcut(QKeySequence(secuencia), self,
+                      activated=lambda d=destino: self._ir_a(d))
+
+        # Globales
         for secuencia, funcion in (
-            ("Ctrl+O", self.abrir_pdf),
-            ("Ctrl+E", self._enviar_correo),
+            ("Ctrl+O", self._abrir_pdf_desde_atajo),
             ("Ctrl+D", self._toggle_tema),
+        ):
+            QShortcut(QKeySequence(secuencia), self, activated=funcion)
+
+        # Sólo dentro de la herramienta de firma: si fueran globales, Enter
+        # se comería el de la herramienta de escaneo.
+        for secuencia, funcion in (
+            ("Ctrl+E", self._enviar_correo),
             ("Ctrl+F", lambda: self.input_buscar.setFocus()),
             ("F5", self._recargar_guardados),
             ("Return", self._reabrir_desde_boton),
         ):
-            QShortcut(QKeySequence(secuencia), self, activated=funcion)
+            QShortcut(QKeySequence(secuencia), pagina_firmar, activated=funcion,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+
+    def _abrir_pdf_desde_atajo(self):
+        self._ir_a("firmar")
+        self.abrir_pdf()
 
     # ── Tema ──────────────────────────────────────────────────────────────
     def _toggle_tema(self):
         nuevo = "dark" if current_mode() == "light" else "light"
         apply_theme(QApplication.instance(), nuevo)
-        self.btn_tema.setText("☀" if nuevo == "dark" else "🌙")
-        self._dot.setStyleSheet(f"color: {THEME['primary']}; font-size: 10px;")
+        self.barra_lateral.sincronizar_tema()
 
         self.config["tema"] = nuevo
         try:
@@ -419,7 +516,7 @@ class VentanaPrincipal(QMainWindow):
 
     # ── Lista de guardados ────────────────────────────────────────────────
     def _recargar_guardados(self):
-        """Relee pdfs_firmados/ y reconstruye la lista.
+        """Relee la carpeta de firmados y reconstruye la lista.
 
         Un solo stat() por archivo: se reutiliza el mtime del ordenamiento
         para construir el item (antes se llamaba dos veces por archivo).
@@ -446,6 +543,16 @@ class VentanaPrincipal(QMainWindow):
                     break
 
         self._filtrar_lista(self.input_buscar.text())
+        self._actualizar_inicio()
+
+    def _actualizar_inicio(self):
+        """Refresca los documentos recientes que muestra el launcher."""
+        recientes = []
+        for i in range(min(3, self.lista_guardados.count())):
+            item = self.lista_guardados.item(i)
+            recientes.append((item.ruta, item.data(ROL_FECHA) or ""))
+        self.pantalla_inicio.set_recientes(recientes,
+                                           self.lista_guardados.count())
 
     def _vigilar_carpeta(self):
         """Refresca la lista si la carpeta cambia desde afuera (con debounce
@@ -495,6 +602,14 @@ class VentanaPrincipal(QMainWindow):
     def _item_seleccionado(self) -> ItemGuardado | None:
         items = self.lista_guardados.selectedItems()
         return items[0] if items else None      # type: ignore[return-value]
+
+    # ── Herramienta: escanear a PDF ───────────────────────────────────────
+    def _on_pdf_escaneado(self, ruta: str):
+        destino = Path(ruta)
+        log.info("PDF armado desde el escáner: %s", destino.name)
+        self.status.showMessage(f"Documento creado: {destino.name}")
+        if destino.parent == CARPETA_FIRMADO:
+            self._agregar_item_guardado(destino)
 
     # ── Ajustes ───────────────────────────────────────────────────────────
     def _abrir_ajustes(self):
@@ -662,6 +777,7 @@ class VentanaPrincipal(QMainWindow):
     def _activar_pdf(self, ruta: Path, total_paginas: int = 0):
         self._trabajo = TrabajoFirma(ruta_pdf=ruta, total_paginas=total_paginas)
         log.info("Trabajo iniciado sobre %s (%d páginas)", ruta.name, total_paginas)
+        self._ir_a("firmar")
         self._limpiar_panel_activo()
         self._lay_panel.addWidget(
             _panel_activo(ruta, total_paginas,
@@ -756,7 +872,8 @@ class VentanaPrincipal(QMainWindow):
         cantidad = self._trabajo.cantidad
         plural = "s" if cantidad != 1 else ""
         self.status.showMessage(
-            f"{cantidad} página{plural} ({etiqueta_pags}) enviada{plural} a la impresora…")
+            f"{cantidad} página{plural} ({etiqueta_pags}) "
+            f"enviada{plural} a la impresora…")
         self._abrir_escaneo()
 
     def _abrir_escaneo(self):
@@ -808,7 +925,7 @@ class VentanaPrincipal(QMainWindow):
 
         plural = "s" if cantidad != 1 else ""
         self.status.showMessage(
-            f"✅  Guardado: {ruta_final.name} ({cantidad} página{plural})")
+            f"Guardado: {ruta_final.name} ({cantidad} página{plural})")
         QMessageBox.information(
             self, "¡Listo!",
             f"Documento guardado:\n{ruta_final}\n\n"
@@ -922,6 +1039,9 @@ def main():
     icono = BASE_DIR / "assets" / "icon.png"
     if icono.is_file():
         app.setWindowIcon(QIcon(str(icono)))
+    else:
+        # Sin archivo de icono, mejor el dibujado que el genérico de Qt.
+        app.setWindowIcon(QIcon(iconos.icono_app(256)))
 
     # El .exe se compila con console=False: sin log a archivo, cualquier
     # error en la máquina del usuario se perdía sin dejar rastro.
