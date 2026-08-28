@@ -11,10 +11,11 @@ y se puede reordenar, girar o descartar antes de armar el PDF.
 
 Reparto de responsabilidades
 ----------------------------
-  modules/documento_escaneado.py  qué páginas hay y en qué orden (sin Qt)
-  modules/escaner_qt.py           el hilo que habla con WIA
-  modules/imagen_pdf.py           imagen → PDF de una página
-  este módulo                     solamente la pantalla
+  modules/documento.py    qué páginas hay y en qué orden (sin Qt)
+  modules/armado_pdf.py   escribe el PDF final (sin Qt)
+  modules/escaner_qt.py   el hilo que habla con WIA
+  modules/imagen_pdf.py   imagen → PDF de una página
+  este módulo             solamente la pantalla
 
 Detalles que importan
 ---------------------
@@ -62,10 +63,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from modules.armado_pdf import armar_pdf, instantanea
 from modules.dispositivos import ErrorDispositivo, verificar_escaneo_disponible
-from modules.documento_escaneado import (
-    DocumentoEscaneado,
-    PaginaEscaneada,
+from modules.documento import (
+    ORIGEN_ESCANER,
+    ORIGEN_IMAGEN,
+    Documento,
+    Pagina,
     con_extension_pdf,
     filtrar_imagenes,
 )
@@ -75,7 +79,6 @@ from modules.imagen_pdf import (
     LIMITE_CORREO_MB,
     borrar_si_existe,
     calidad,
-    convertir_imagen_a_pdf,
     excede_limite,
     formatear_peso,
     opciones_calidad,
@@ -239,88 +242,36 @@ def dimensiones(ruta: str | Path) -> tuple[int, int]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _WorkerArmarPDF(QThread):
-    """Convierte cada página a PDF y las une en un documento nuevo."""
+    """Escribe el PDF en segundo plano.
+
+    El trabajo de verdad vive en modules/armado_pdf.py, que no sabe de Qt:
+    acá sólo se lo saca del hilo de la interfaz y se traducen sus avisos a
+    señales. Así el armado se puede probar abriendo el PDF resultante, sin
+    levantar una ventana ni un hilo.
+    """
 
     progreso = pyqtSignal(int, str)     # (porcentaje 0-100, etiqueta)
     listo    = pyqtSignal(str)          # ruta del PDF final
     error    = pyqtSignal(str)          # mensaje + traceback
 
-    def __init__(self, paginas: list[PaginaEscaneada], destino: Path,
+    def __init__(self, paginas: list[Pagina], destino: Path,
                  cal=CALIDAD_DEFECTO):
         super().__init__()              # SIN parent= a propósito
         self._calidad = calidad(cal)
-        # Se copian los datos: el modelo puede cambiar mientras el hilo
-        # trabaja si el usuario sigue tocando la lista.
-        self._paginas = [(Path(p.ruta), p.rotacion) for p in paginas]
+        # Se congela la lista: el modelo puede cambiar mientras el hilo
+        # trabaja si el usuario sigue tocando la pantalla.
+        self._paginas = instantanea(paginas)
         self._destino = Path(destino)
 
     def run(self):
-        temporales: list[str] = []
-        parcial: Path | None = None
         try:
-            if not self._paginas:
-                raise ValueError("No hay páginas para guardar.")
-
-            try:
-                from pypdf import PdfReader, PdfWriter
-            except ImportError:
-                from PyPDF2 import PdfReader, PdfWriter  # type: ignore
-
-            escritor = PdfWriter()
-            # Los lectores tienen que seguir vivos hasta escribir: pypdf
-            # resuelve los objetos de las páginas de forma perezosa.
-            lectores = []
-
-            total = len(self._paginas)
-            for i, (ruta, rotacion) in enumerate(self._paginas):
-                if not ruta.is_file():
-                    raise FileNotFoundError(
-                        f"No se encuentra la imagen de la página {i + 1}:\n{ruta}")
-
-                self.progreso.emit(
-                    3 + int(i / total * 85),
-                    f"Procesando la página {i + 1} de {total}…")
-
-                ruta_pdf = convertir_imagen_a_pdf(str(ruta), rotacion,
-                                                  self._calidad)
-                temporales.append(ruta_pdf)
-                lector = PdfReader(ruta_pdf)
-                lectores.append(lector)
-                escritor.add_page(lector.pages[0])
-
-            self.progreso.emit(92, "Escribiendo el documento…")
-            try:
-                escritor.add_metadata({
-                    "/Producer": "PDF Sign Assistant",
-                    "/Creator": "PDF Sign Assistant",
-                })
-            except Exception as e:                       # noqa: BLE001
-                log.warning("No se pudieron escribir los metadatos: %s", e)
-
-            self._destino.parent.mkdir(parents=True, exist_ok=True)
-
-            # Escritura en dos pasos: si el proceso muere a mitad de camino,
-            # el archivo que el usuario ya tenía no queda truncado.
-            parcial = self._destino.with_name(self._destino.name + ".parcial")
-            with open(parcial, "wb") as salida:
-                escritor.write(salida)
-            os.replace(parcial, self._destino)
-            parcial = None
-
-            log.info("PDF armado: %s (%d páginas, %d bytes)",
-                     self._destino, total, self._destino.stat().st_size)
-            self.progreso.emit(100, "¡Listo!")
+            armar_pdf(self._paginas, self._destino, cal=self._calidad,
+                      progreso=self.progreso.emit)
             self.listo.emit(str(self._destino))
-
         except Exception as e:                           # noqa: BLE001
             tb = traceback.format_exc()
             log.error("Error al armar el PDF:\n%s", tb)
             self.error.emit(f"{e}\n\n─── Traceback completo ───\n{tb}")
-        finally:
-            for t in temporales:
-                borrar_si_existe(t)
-            if parcial is not None:
-                borrar_si_existe(str(parcial))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -336,7 +287,7 @@ class FilaEscaneada(QFrame):
     rotar_pedido = pyqtSignal(int, int)
     quitar_pedido = pyqtSignal(int)
 
-    def __init__(self, pagina: PaginaEscaneada, numero: int, parent=None):
+    def __init__(self, pagina: Pagina, numero: int, parent=None):
         super().__init__(parent)
         self.id_pagina = pagina.id
         self.setObjectName("filaPagina")
@@ -400,7 +351,7 @@ class FilaEscaneada(QFrame):
             acciones.addWidget(b)
         lay.addLayout(acciones, 0)
 
-    def actualizar(self, pagina: PaginaEscaneada, numero: int, total: int,
+    def actualizar(self, pagina: Pagina, numero: int, total: int,
                    activa: bool) -> None:
         self.lbl_numero.setText(str(numero))
         self.btn_subir.setEnabled(numero > 1)
@@ -521,7 +472,7 @@ class VistaEscanearAPdf(QWidget):
         self.carpeta_destino = Path(carpeta_destino)
         self._calidad_inicial = calidad_inicial
         self._limite_mb = limite_mb
-        self.doc = DocumentoEscaneado()
+        self.doc = Documento()
         self._filas: dict[int, FilaEscaneada] = {}
         self._seleccionada: int | None = None
         self._worker: _WorkerArmarPDF | None = None
@@ -885,7 +836,7 @@ class VistaEscanearAPdf(QWidget):
     def _on_escaneo_listo(self, ruta: str) -> None:
         self._escaneando = False
         self._temporales.append(ruta)
-        pagina = self.doc.agregar(ruta, origen="escaner", temporal=True)
+        pagina = self.doc.agregar(ruta, origen=ORIGEN_ESCANER, temporal=True)
         self._seleccionada = pagina.id
         self._refrescar()
         self._ir_a_la_ultima()
@@ -922,7 +873,7 @@ class VistaEscanearAPdf(QWidget):
                 "Formatos admitidos: PNG, JPG, BMP y TIFF.")
             return
         nuevas = self.doc.agregar_varias(validas, temporal=False,
-                                         origen="archivo")
+                                         origen=ORIGEN_IMAGEN)
         if nuevas:
             self._seleccionada = nuevas[-1].id
         self._refrescar()
