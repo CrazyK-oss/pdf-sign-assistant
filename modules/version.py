@@ -20,7 +20,7 @@ olvido no llega a gastar un build de Windows.
 
 from __future__ import annotations
 
-__version__ = "0.11.1"
+__version__ = "0.12.0"
 
 APP_NOMBRE = "PDF Sign Assistant"
 APP_ID = "pdf-sign-assistant"

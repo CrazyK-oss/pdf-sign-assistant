@@ -144,6 +144,11 @@ CONFIG_DEFAULT: dict = {
     "actualizaciones_automaticas": True,
     "ultima_comprobacion": "",
     "version_ignorada": "",
+    # Salida PDF. Ver modules/imagen_pdf.py para las claves de calidad.
+    # El límite es el que aplican Outlook y Exchange por omisión; muchas
+    # organizaciones lo bajan, y por eso es configurable.
+    "calidad_pdf": "equilibrada",
+    "limite_correo_mb": 20,
 }
 
 

@@ -70,7 +70,17 @@ from modules.documento_escaneado import (
     filtrar_imagenes,
 )
 from modules.escaner_qt import DPI_DOCUMENTO, lanzar_escaneo
-from modules.imagen_pdf import borrar_si_existe, convertir_imagen_a_pdf
+from modules.imagen_pdf import (
+    CALIDAD_DEFECTO,
+    LIMITE_CORREO_MB,
+    borrar_si_existe,
+    calidad,
+    convertir_imagen_a_pdf,
+    excede_limite,
+    formatear_peso,
+    opciones_calidad,
+    siguiente_mas_liviana,
+)
 from modules.theme import BREAKPOINT, SIZE, SPACE, repolish, theme_signals
 from modules.ui import (
     AreaScroll,
@@ -83,6 +93,7 @@ from modules.ui import (
     boton_icono,
     etiqueta,
     icono_label,
+    selector,
     separador_v,
     tarjeta,
 )
@@ -223,15 +234,6 @@ def dimensiones(ruta: str | Path) -> tuple[int, int]:
     return (tam.width(), tam.height()) if tam.isValid() else (0, 0)
 
 
-def formatear_peso(bytes_: int) -> str:
-    """'2,4 MB' — con coma decimal, que es lo que se usa en español."""
-    if bytes_ < 1024:
-        return f"{bytes_} B"
-    if bytes_ < 1024 * 1024:
-        return f"{bytes_ / 1024:.0f} kB"
-    return f"{bytes_ / (1024 * 1024):.1f} MB".replace(".", ",")
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Worker: arma el PDF en hilo secundario
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -243,8 +245,10 @@ class _WorkerArmarPDF(QThread):
     listo    = pyqtSignal(str)          # ruta del PDF final
     error    = pyqtSignal(str)          # mensaje + traceback
 
-    def __init__(self, paginas: list[PaginaEscaneada], destino: Path):
+    def __init__(self, paginas: list[PaginaEscaneada], destino: Path,
+                 cal=CALIDAD_DEFECTO):
         super().__init__()              # SIN parent= a propósito
+        self._calidad = calidad(cal)
         # Se copian los datos: el modelo puede cambiar mientras el hilo
         # trabaja si el usuario sigue tocando la lista.
         self._paginas = [(Path(p.ruta), p.rotacion) for p in paginas]
@@ -277,7 +281,8 @@ class _WorkerArmarPDF(QThread):
                     3 + int(i / total * 85),
                     f"Procesando la página {i + 1} de {total}…")
 
-                ruta_pdf = convertir_imagen_a_pdf(str(ruta), rotacion)
+                ruta_pdf = convertir_imagen_a_pdf(str(ruta), rotacion,
+                                                  self._calidad)
                 temporales.append(ruta_pdf)
                 lector = PdfReader(ruta_pdf)
                 lectores.append(lector)
@@ -506,12 +511,16 @@ class VistaEscanearAPdf(QWidget):
     volver = pyqtSignal()
     documento_guardado = pyqtSignal(str)
 
-    def __init__(self, carpeta_destino: Path, parent=None):
+    def __init__(self, carpeta_destino: Path, parent=None,
+                 calidad_inicial=CALIDAD_DEFECTO,
+                 limite_mb: float = LIMITE_CORREO_MB):
         super().__init__(parent)
         self.setObjectName("pantalla")
         self.setAcceptDrops(True)
 
         self.carpeta_destino = Path(carpeta_destino)
+        self._calidad_inicial = calidad_inicial
+        self._limite_mb = limite_mb
         self.doc = DocumentoEscaneado()
         self._filas: dict[int, FilaEscaneada] = {}
         self._seleccionada: int | None = None
@@ -616,6 +625,18 @@ class VistaEscanearAPdf(QWidget):
             lay.addWidget(b)
 
         lay.addStretch(1)
+
+        lay.addWidget(etiqueta("Calidad:", rol="hint"))
+        opciones = opciones_calidad()
+        self.combo_calidad = selector(
+            [(c, n) for c, n, _ in opciones],
+            actual=calidad(self._calidad_inicial).clave,
+            tooltips={c: d for c, _, d in opciones},
+            on_change=self._on_calidad, min_w=150)
+        self._on_calidad(self.combo_calidad.currentData())
+        lay.addWidget(self.combo_calidad)
+
+        lay.addWidget(separador_v(26))
 
         self.chip_escaner = Chip("", tono="neutro", icono_nombre="escaner")
         lay.addWidget(self.chip_escaner)
@@ -954,7 +975,8 @@ class VistaEscanearAPdf(QWidget):
 
         self.barra_progreso.setValue(0)
         self.barra_progreso.show()
-        worker = _WorkerArmarPDF(list(self.doc.paginas), destino)
+        worker = _WorkerArmarPDF(list(self.doc.paginas), destino,
+                                 self.combo_calidad.currentData())
         self._worker = worker
         worker.progreso.connect(self._on_progreso)
         worker.listo.connect(self._on_guardado)
@@ -967,15 +989,30 @@ class VistaEscanearAPdf(QWidget):
         self.barra_progreso.setValue(porcentaje)
         self.pie.set_estado(etapa, tono="info")
 
+    def _on_calidad(self, clave) -> None:
+        cal = calidad(clave)
+        self.combo_calidad.setToolTip(cal.descripcion)
+
     def _on_guardado(self, ruta: str) -> None:
         self.barra_progreso.hide()
-        nombre = Path(ruta).name
-        self.pie.set_estado(f"Guardado: {nombre}", rol="ok", tono="ok")
+        destino = Path(ruta)
+        nombre = destino.name
+        try:
+            peso = destino.stat().st_size
+        except OSError:
+            peso = 0
+
+        self.pie.set_estado(f"Guardado: {nombre}  ·  {formatear_peso(peso)}",
+                            rol="ok", tono="ok")
         self.documento_guardado.emit(ruta)
+
+        if peso and excede_limite(peso, self._limite_mb):
+            self._avisar_demasiado_grande(peso)
 
         respuesta = QMessageBox.question(
             self, "PDF guardado",
-            f"Se guardó «{nombre}» con {self.doc.total} página(s).\n\n"
+            f"Se guardó «{nombre}» ({formatear_peso(peso)}) con "
+            f"{self.doc.total} página(s).\n\n"
             "¿Querés empezar un documento nuevo?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -984,6 +1021,20 @@ class VistaEscanearAPdf(QWidget):
             self._seleccionada = None
             limpiar_cache()
         self._refrescar()
+
+    def _avisar_demasiado_grande(self, peso: int) -> None:
+        """Un PDF que no entra como adjunto es medio inservible, y darse
+        cuenta al adjuntarlo obliga a rehacer todo el escaneo."""
+        mas_liviana = siguiente_mas_liviana(self.combo_calidad.currentData())
+        texto = (f"El documento pesa {formatear_peso(peso)} y el límite de "
+                 f"adjunto habitual es de {self._limite_mb} MB.")
+        if mas_liviana is None:
+            texto += ("\n\nYa está en la calidad más liviana: convendría "
+                      "partirlo en varios documentos.")
+        else:
+            texto += (f"\n\nProbá con la calidad «{mas_liviana.nombre}» y "
+                      "volvé a guardar: " + mas_liviana.descripcion)
+        QMessageBox.warning(self, "El archivo es grande", texto)
 
     def _on_error_guardado(self, mensaje: str) -> None:
         self.barra_progreso.hide()

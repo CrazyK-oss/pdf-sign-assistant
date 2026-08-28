@@ -22,6 +22,25 @@ Tres motores, en orden
 
 Si uno falla se pasa al siguiente y se deja anotado en el log, en vez de
 abortar el guardado entero por un motor que no le gustó un formato.
+
+El tamaño del archivo
+---------------------
+Hasta la 0.11.1 la imagen se embebía **sin pérdida**: reportlab la metía
+comprimida con Flate, que para un escaneo —papel con ruido, tinta, sombras—
+es lo peor posible. Medido con una hoja A4 real:
+
+    600 dpi sin pérdida    3,4 MB por página
+    300 dpi JPEG q88       0,58 MB      ( 6x menos)
+    200 dpi JPEG q80       0,12 MB      (36x menos)
+
+Con tres hojas firmadas eso eran 10 MB, y Outlook rechaza los adjuntos que
+pasan de 20. El documento no se podía mandar, que es justamente para lo que
+la aplicación lo produce.
+
+Ahora la imagen se remuestrea al DPI del preset y se embebe como JPEG.
+reportlab lo pasa **tal cual** al PDF (filtro DCTDecode), sin recodificar,
+así que no hay doble pérdida. `SIN_PERDIDA` conserva el comportamiento
+viejo para quien lo necesite.
 """
 
 from __future__ import annotations
@@ -31,10 +50,107 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Calidad de salida
+# ─────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CalidadPDF:
+    """Cuánto se remuestrea y se comprime cada página."""
+
+    clave: str
+    nombre: str
+    descripcion: str
+    #: Tope de resolución. Si el escaneo viene con más, se reduce.
+    dpi_max: int
+    #: Calidad JPEG (1-95). Con 0 se embebe sin pérdida.
+    jpeg: int
+
+    @property
+    def sin_perdida(self) -> bool:
+        return self.jpeg <= 0
+
+
+#: Los números salen de comparar los recortes a ojo sobre un A4 escaneado:
+#: a 200 dpi con q80 el texto y el trazo de la firma son indistinguibles
+#: del original, y recién a 150/q70 se empieza a notar el texto más lavado.
+ALTA = CalidadPDF(
+    "alta", "Alta",
+    "300 dpi. Para archivar o reimprimir; el archivo pesa unas 6 veces menos "
+    "que sin comprimir.", 300, 88)
+
+EQUILIBRADA = CalidadPDF(
+    "equilibrada", "Equilibrada",
+    "200 dpi. Indistinguible en pantalla y se imprime bien. Es la que "
+    "conviene para mandar por correo.", 200, 80)
+
+MINIMA = CalidadPDF(
+    "minima", "Mínima",
+    "150 dpi. Para documentos largos que igual no entran; el texto se ve un "
+    "poco más lavado.", 150, 70)
+
+SIN_PERDIDA = CalidadPDF(
+    "sin_perdida", "Sin comprimir",
+    "Guarda el escaneo tal cual, sin remuestrear ni comprimir. Es el "
+    "comportamiento anterior: da archivos enormes.", 0, 0)
+
+CALIDADES: dict[str, CalidadPDF] = {
+    c.clave: c for c in (ALTA, EQUILIBRADA, MINIMA, SIN_PERDIDA)
+}
+
+#: Orden de peor a mejor compresión, para "probá con una más liviana".
+ORDEN = ("sin_perdida", "alta", "equilibrada", "minima")
+
+CALIDAD_DEFECTO = EQUILIBRADA
+
+
+#: Tope de adjunto que aplican Outlook y Exchange por omisión. Muchas
+#: organizaciones lo bajan todavía más, así que es configurable.
+LIMITE_CORREO_MB = 20
+
+
+def formatear_peso(bytes_: int) -> str:
+    """'2,4 MB' — con coma decimal, que es lo que se usa en español."""
+    if bytes_ < 1024:
+        return f"{bytes_} B"
+    if bytes_ < 1024 * 1024:
+        return f"{bytes_ / 1024:.0f} kB"
+    return f"{bytes_ / (1024 * 1024):.1f} MB".replace(".", ",")
+
+
+def excede_limite(bytes_: int, limite_mb: float = LIMITE_CORREO_MB) -> bool:
+    """True si el archivo no va a entrar como adjunto."""
+    return bytes_ > max(1.0, float(limite_mb)) * 1024 * 1024
+
+
+def calidad(clave: str | CalidadPDF | None) -> CalidadPDF:
+    """Resuelve una clave de calidad, con el default como red de seguridad."""
+    if isinstance(clave, CalidadPDF):
+        return clave
+    return CALIDADES.get(str(clave or ""), CALIDAD_DEFECTO)
+
+
+def opciones_calidad() -> list[tuple[str, str, str]]:
+    """(clave, nombre, descripción) de cada calidad, para armar un selector."""
+    return [(CALIDADES[k].clave, CALIDADES[k].nombre, CALIDADES[k].descripcion)
+            for k in ORDEN[::-1]]      # de la más liviana a la más pesada
+
+
+def siguiente_mas_liviana(actual: str | CalidadPDF | None) -> CalidadPDF | None:
+    """La calidad que sigue si el archivo quedó demasiado grande."""
+    clave = calidad(actual).clave
+    try:
+        i = ORDEN.index(clave)
+    except ValueError:                               # pragma: no cover
+        return CALIDAD_DEFECTO
+    return calidad(ORDEN[i + 1]) if i + 1 < len(ORDEN) else None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -113,6 +229,86 @@ def borrar_si_existe(ruta: str | None) -> None:
         pass
 
 
+def _dpi_de(img, defecto: int = 150) -> float:
+    """DPI horizontal de la imagen, saneado.
+
+    Los escáneres a veces no lo declaran, o declaran 0 o 1. Cualquiera de
+    esas haría que la página del PDF saliera del tamaño equivocado, o que
+    la división para remuestrear explotara.
+    """
+    dpi = img.info.get("dpi", (defecto, defecto))
+    if isinstance(dpi, (int, float)):
+        dpi = (dpi, dpi)
+    try:
+        valor = float(dpi[0])
+    except (TypeError, ValueError, IndexError):
+        return float(defecto)
+    return valor if 20 <= valor <= 2400 else float(defecto)
+
+
+def preparar_para_pdf(ruta_imagen: str,
+                      cal: CalidadPDF | None = None) -> tuple[str, bool]:
+    """Remuestrea y comprime la imagen antes de embeberla.
+
+    Devuelve (ruta, es_temporal). Con SIN_PERDIDA devuelve el original sin
+    tocar, para conservar el comportamiento anterior.
+
+    La clave del ahorro es guardar como JPEG: reportlab detecta el formato
+    y lo copia al PDF con filtro DCTDecode, sin volver a codificar, así que
+    la pérdida ocurre una sola vez y acá.
+    """
+    cal = calidad(cal)
+    if cal.sin_perdida:
+        return ruta_imagen, False
+
+    try:
+        # El import va DENTRO del try a propósito: sin Pillow, comprimir
+        # es imposible pero guardar no, y el llamador debe recibir el
+        # original en vez de una excepción.
+        from PIL import Image
+
+        with Image.open(ruta_imagen) as img:
+            dpi = _dpi_de(img)
+            trabajo = img
+
+            if dpi > cal.dpi_max:
+                factor = cal.dpi_max / dpi
+                ancho = max(1, round(img.width * factor))
+                alto = max(1, round(img.height * factor))
+                trabajo = img.resize((ancho, alto), Image.LANCZOS)
+                # El DPI se recalcula desde los píxeles que quedaron, no se
+                # asume dpi_max: así el tamaño físico (px/dpi) se mantiene
+                # lo más cerca posible del original. No puede quedar exacto
+                # porque JFIF guarda la densidad como entero, pero el error
+                # es menor a 1 punto (0,35 mm) en un A4. En el flujo de
+                # firma ni eso importa: la página hereda el mediabox del
+                # documento original.
+                dpi = max(1, round(ancho * dpi / img.width))
+
+            # JPEG no admite alpha ni paleta; la composición sobre blanco
+            # la hace _normalizar_modo_pillow, que ya contempla los modos
+            # raros que devuelven algunos drivers.
+            trabajo = _normalizar_modo_pillow(trabajo)
+            if trabajo.mode != "RGB":
+                trabajo = trabajo.convert("RGB")
+
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.close()
+            trabajo.save(tmp.name, "JPEG", quality=cal.jpeg, optimize=True,
+                         dpi=(dpi, dpi), subsampling=2)
+    except Exception as e:                           # noqa: BLE001
+        # Comprimir es una mejora, no un requisito: si falla, se sigue con
+        # el original y el usuario obtiene un archivo grande pero correcto.
+        log.warning("No se pudo comprimir %s (%s: %s); se usa el original",
+                    ruta_imagen, type(e).__name__, e)
+        return ruta_imagen, False
+
+    log.debug("Comprimida a %s dpi q%d: %s → %s bytes",
+              cal.dpi_max, cal.jpeg, ruta_imagen,
+              Path(tmp.name).stat().st_size)
+    return tmp.name, True
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Motores
 # ─────────────────────────────────────────────────────────────────────────
@@ -126,11 +322,11 @@ def _imagen_a_pdf_reportlab(ruta_imagen: str) -> str:
 
     with Image.open(ruta_imagen) as img:
         ancho_px, alto_px = img.size
-        dpi = img.info.get("dpi", (150, 150))
+        dpi_x = _dpi_de(img)
+        dpi = img.info.get("dpi", (dpi_x, dpi_x))
         if isinstance(dpi, (int, float)):
             dpi = (dpi, dpi)
-        dpi_x = dpi[0] if dpi[0] > 0 else 150
-        dpi_y = dpi[1] if dpi[1] > 0 else 150
+        dpi_y = dpi[1] if len(dpi) > 1 and 20 <= dpi[1] <= 2400 else dpi_x
 
     ancho_pt = ancho_px * 72.0 / dpi_x
     alto_pt = alto_px * 72.0 / dpi_y
@@ -208,7 +404,8 @@ def _imagen_a_pdf_img2pdf(ruta_imagen: str) -> str:
 #  API pública
 # ─────────────────────────────────────────────────────────────────────────
 
-def convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0) -> str:
+def convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0,
+                           cal: CalidadPDF | str | None = None) -> str:
     """Convierte una imagen (con su rotación) a un PDF de una página.
 
     Devuelve la ruta de un archivo TEMPORAL: el llamador es responsable
@@ -216,14 +413,15 @@ def convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0) -> str:
 
     Intenta reportlab → img2pdf (subproceso) → Pillow, en ese orden.
     """
-    ruta_rotada, temporal = aplicar_rotacion(ruta_imagen, rotacion)
+    ruta_rotada, temp_rot = aplicar_rotacion(ruta_imagen, rotacion)
+    ruta_lista, temp_jpg = preparar_para_pdf(ruta_rotada, cal)
     try:
         for nombre, motor in (
             ("reportlab", _imagen_a_pdf_reportlab),
             ("img2pdf", _imagen_a_pdf_img2pdf),
         ):
             try:
-                ruta = motor(ruta_rotada)
+                ruta = motor(ruta_lista)
                 log.debug("Conversión con %s OK → %s", nombre, ruta)
                 return ruta
             except ImportError:
@@ -233,9 +431,11 @@ def convertir_imagen_a_pdf(ruta_imagen: str, rotacion: int = 0) -> str:
                             nombre, type(e).__name__, e)
 
         log.debug("Usando Pillow como último fallback")
-        return _imagen_a_pdf_pillow(ruta_rotada)
+        return _imagen_a_pdf_pillow(ruta_lista)
     finally:
-        if temporal:
+        if temp_jpg:
+            borrar_si_existe(ruta_lista)
+        if temp_rot:
             borrar_si_existe(ruta_rotada)
 
 

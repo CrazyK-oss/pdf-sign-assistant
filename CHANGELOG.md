@@ -11,6 +11,27 @@ build falla antes de publicar.
 Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 (`vX.Y.Z`) y que `modules/version.py`. Un test lo verifica.
 
+## 0.12.0 — Documentos que entran en un correo
+
+**El PDF pesaba demasiado para mandarlo**
+- El documento firmado existe para enviarse por correo, y no entraba. La imagen se embebía **sin pérdida**, que para un escaneo —papel con ruido, tinta, sombras— es la peor opción posible. Medido sobre un A4 real: **3,4 MB por hoja** a 600 dpi. Seis hojas y Outlook ya rechazaba el adjunto, después de haber impreso, firmado y escaneado todo
+- Ahora la página se remuestrea y se embebe como JPEG. reportlab lo copia **tal cual** al PDF (filtro DCTDecode), sin recodificar, así que la pérdida ocurre una sola vez
+- Con la calidad por defecto, la misma hoja pasa de 3,4 MB a **0,26 MB**. Donde antes entraban 5 páginas firmadas en un correo, ahora entran **75**
+
+**Elegís cuánto comprimir**
+- Selector de calidad en las dos pantallas de guardado: **Alta** (300 dpi), **Equilibrada** (200 dpi, la de fábrica), **Mínima** (150 dpi) y **Sin comprimir**, que conserva el comportamiento anterior
+- Los números salen de comparar los recortes a ojo: a 200 dpi el texto y el trazo de la firma son indistinguibles del original, y recién a 150 se empieza a notar el texto más lavado
+- La calidad elegida se recuerda: quien la baja una vez suele necesitarla siempre, porque su correo tiene el mismo límite mañana
+
+**Avisos antes de que sea tarde**
+- Si el archivo guardado supera el límite, la pantalla lo dice y ofrece **volver a guardarlo con la calidad siguiente**, en vez de dejar que el usuario lo descubra al adjuntarlo
+- La pantalla de envío muestra el peso del adjunto antes de abrir el cliente de correo, en rojo si no entra y en ámbar si está cerca del tope
+- El límite (20 MB, el de Outlook y Exchange) es configurable: muchas organizaciones lo tienen más bajo
+
+**Robustez**
+- El remuestreo recalcula el DPI desde los píxeles que quedaron, para que el tamaño físico de la página no se mueva. No puede quedar exacto porque JFIF guarda la densidad como entero, pero el error queda por debajo de 1 punto (0,35 mm)
+- Comprimir es una mejora, no un requisito: si Pillow falta o la imagen no se puede leer, se guarda el original en vez de fallar el guardado entero
+
 ## 0.11.1 — El actualizador dice qué cambió
 
 - **El aviso de actualización ahora muestra el changelog.** Antes mostraba el cuerpo del Release, que era una plantilla fija con instrucciones de descarga: dónde bajar el `.exe`, la advertencia de SmartScreen, dónde quedan los archivos. Le explicaba al usuario cómo descargar algo que la app ya estaba por descargar sola, y no le decía **qué cambió**

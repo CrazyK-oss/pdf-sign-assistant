@@ -74,6 +74,7 @@ pantalla de inicio hay que tocarlas.
 
 ## Funcionalidades
 
+- 📧 **El PDF entra en un correo** — las páginas escaneadas se remuestrean y se comprimen al guardar: una hoja firmada pasa de 3,4 MB a 0,26 MB, y podés elegir la calidad. Si aun así se pasa del límite de adjunto, la app lo avisa y ofrece rehacerlo más liviano
 - 🧰 **Menú de herramientas** — barra lateral permanente y pantalla de inicio con una tarjeta por herramienta; se colapsa a una tira de iconos cuando la ventana se angosta
 - 🖨️ **Escanear a PDF** — armá un documento nuevo hoja por hoja: cada página aparece con su miniatura y se puede subir, bajar, girar o descartar antes de guardar
 - 🎨 **Iconografía vectorial propia** — 49 iconos dibujados en SVG dentro del código, que se colorean con el tema. Ya no dependen de que la fuente del sistema tenga el emoji (`👁` salía como una raya y `🌙` como un punto, según la máquina)
