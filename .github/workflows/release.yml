@@ -10,13 +10,26 @@ name: Release
 # sube ambos artefactos al Release. Compilar en CI (y no a mano) evita el
 # clásico "en mi máquina andaba": el runner no tiene nada instalado de más.
 #
-# También se puede disparar a mano desde la pestaña Actions para probar el
-# build sin publicar nada.
+# También se puede disparar a mano desde la pestaña Actions. Por defecto
+# sólo compila, para probar el build sin publicar nada; marcando
+# `publicar` crea el tag y el Release desde acá mismo, tomando el número
+# de modules/version.py.
+#
+# Ese modo existe porque no siempre se puede empujar un tag desde donde se
+# está trabajando (credenciales limitadas a las ramas, políticas de
+# egress). `gh release create --target <sha>` crea el tag del lado del
+# servidor, así que el resultado es idéntico al del disparo por tag.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publicar:
+        description: >-
+          Crear el tag y publicar el Release (si no, sólo compila)
+        type: boolean
+        default: false
 
 permissions:
   contents: write        # necesario para crear el Release
@@ -53,6 +66,26 @@ jobs:
         shell: bash
         run: echo "version=$(python -m modules.version)" >> "$GITHUB_OUTPUT"
 
+      # Un único lugar decide si esta corrida publica, para no repetir la
+      # condición en cada paso de abajo.
+      - name: Decidir si se publica
+        id: modo
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "publicar=true"  >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "Publicando por tag: ${GITHUB_REF_NAME}"
+          elif [ "${{ inputs.publicar }}" = "true" ]; then
+            echo "publicar=true" >> "$GITHUB_OUTPUT"
+            echo "tag=v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "Publicando a pedido: v${{ steps.version.outputs.version }}"
+            echo "El tag lo crea 'gh release create --target' sobre $GITHUB_SHA"
+          else
+            echo "publicar=false" >> "$GITHUB_OUTPUT"
+            echo "Sólo compilación: no se publica nada."
+          fi
+
       # Si el tag y modules/version.py no coinciden, el Release quedaría
       # etiquetado con un número y la app mostrando otro.
       - name: Verificar que el tag coincida con la versión
@@ -67,6 +100,23 @@ jobs:
             exit 1
           fi
           echo "Tag y versión coinciden: $proyecto"
+
+      # Publicar a pedido sobre un tag que ya existe sobrescribiría una
+      # versión ya distribuida: mejor frenar y que suban el número.
+      - name: Verificar que la versión no esté publicada
+        if: steps.modo.outputs.publicar == 'true' && github.ref_type != 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.modo.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::El release $tag ya existe."
+            echo "Subí el número en modules/version.py y agregá su sección"
+            echo "al CHANGELOG antes de volver a publicar."
+            exit 1
+          fi
+          echo "$tag está libre."
 
       # Las notas del Release salen de CHANGELOG.md, no de una plantilla
       # fija. El actualizador interno muestra ese mismo texto al avisar
@@ -173,12 +223,13 @@ jobs:
           retention-days: 14
 
       - name: Publicar el Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.modo.outputs.publicar == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ver="${{ steps.version.outputs.version }}"
+          tag="${{ steps.modo.outputs.tag }}"
 
           # Orden deliberado: primero QUÉ CAMBIÓ, después cómo descargar.
           # El actualizador interno corta en la sentinela y muestra sólo la
@@ -211,7 +262,7 @@ jobs:
 
           ---
 
-          El historial completo está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/main/CHANGELOG.md).
+          El historial completo está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/$tag/CHANGELOG.md).
           EOF
           )"
 
@@ -231,9 +282,18 @@ jobs:
           titulo="PDF Sign Assistant $ver"
           [ -n "$subtitulo" ] && titulo="$titulo — $subtitulo"
 
-          gh release create "$GITHUB_REF_NAME" \
+          # --target sólo hace falta cuando el tag todavía no existe: en
+          # ese caso gh lo crea apuntando a este commit. Si la corrida
+          # vino de un tag empujado, el tag ya está y --target sobra.
+          destino=()
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            destino=(--target "$GITHUB_SHA")
+          fi
+
+          gh release create "$tag" \
             dist/installer/*.exe \
             dist/installer/*.zip \
             dist/installer/SHA256SUMS.txt \
             --title "$titulo" \
-            --notes-file notas.md
+            --notes-file notas.md \
+            "${destino[@]}"
