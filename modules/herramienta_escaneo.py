@@ -18,10 +18,17 @@ Reparto de responsabilidades
 
 Detalles que importan
 ---------------------
-* **Las miniaturas se leen a escala.** Un escaneo A4 a 300 DPI son unos
-  8,7 millones de píxeles; cargarlo entero con QPixmap para mostrarlo de
-  90 px de alto son ~35 MB de RAM por página. Con QImageReader.setScaledSize
-  el decodificador entrega la imagen ya chica, y además se cachea.
+* **Las imágenes se leen a escala, y a la escala correcta.** Un escaneo A4
+  a 300 DPI son unos 8,7 millones de píxeles; cargarlo entero con QPixmap
+  para mostrarlo de 92 px de alto son ~35 MB de RAM por página. Con
+  QImageReader.setScaledSize el decodificador entrega la imagen ya chica.
+  Pero "chica" no es un número fijo: la miniatura y la vista previa piden
+  cada una el tamaño que ocupan de verdad —el panel de la previa crece con
+  la ventana— multiplicado por el devicePixelRatio de la pantalla. Con un
+  tope fijo, la previa terminaba AGRANDANDO la imagen y se veía blanda.
+* **El cache se acota por bytes**, no por cantidad de entradas: los pixmaps
+  de la previa pesan varios MB y un tope contado en entradas no dice nada
+  sobre la memoria que se está usando.
 * **Se escanea a 300 DPI**, no a 600 como al firmar: acá se trata de
   documentos, y a 600 un PDF de 20 páginas se va a cientos de megas sin
   ganar nada legible.
@@ -84,19 +91,45 @@ log = logging.getLogger(__name__)
 
 FILTRO_IMG = "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif)"
 
-#: Miniatura de la lista y lado máximo de la vista previa.
+#: Alto de la miniatura de la lista, en píxeles lógicos.
 LADO_MINIATURA = 92
-LADO_PREVIA = 420
+
+#: Tope de la vista previa. NO es el tamaño al que se lee: la previa se
+#: lee al tamaño que realmente ocupa el panel (que crece con la ventana)
+#: por el devicePixelRatio de la pantalla. Este número sólo evita que en
+#: un monitor enorme se decodifique la imagen casi entera.
+LADO_PREVIA_MAX = 1800
+
+#: Los pedidos de tamaño se redondean hacia arriba a un múltiplo de esto.
+#: Sin cuantizar, arrastrar el borde de la ventana pediría un tamaño
+#: distinto por cada píxel y el cache no serviría de nada.
+PASO_TAMANO = 128
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Lectura de imágenes a escala
 # ═══════════════════════════════════════════════════════════════════════════════
 
-#: (ruta, mtime, lado, rotación) → QPixmap. Acotado para no crecer sin
-#: límite en documentos largos; se descartan las entradas más viejas.
+#: (ruta, mtime, lado, rotación) → QPixmap.
+#:
+#: El cache se acota por BYTES y no por cantidad de entradas: la vista
+#: previa puede pedir pixmaps de varios MB, y un tope de "160 entradas"
+#: que estaba bien para miniaturas de 0,5 MB pasaría a permitir más de un
+#: gigabyte sin que nadie lo note.
 _CACHE: OrderedDict[tuple, QPixmap] = OrderedDict()
-_CACHE_MAX = 160
+_CACHE_BYTES_MAX = 96 * 1024 * 1024
+_cache_bytes = 0
+
+
+def _peso(pm: QPixmap) -> int:
+    """Bytes que ocupa un pixmap en memoria (4 por píxel)."""
+    return max(0, pm.width() * pm.height() * 4)
+
+
+def cuantizar(lado: int, paso: int = PASO_TAMANO) -> int:
+    """Redondea hacia arriba al múltiplo de `paso` (mínimo, un paso)."""
+    lado = max(1, int(lado))
+    return max(paso, -(-lado // paso) * paso)
 
 
 def leer_escalada(ruta: str | Path, lado_max: int, rotacion: int = 0) -> QPixmap:
@@ -136,10 +169,52 @@ def leer_escalada(ruta: str | Path, lado_max: int, rotacion: int = 0) -> QPixmap
         pm = pm.transformed(QTransform().rotate(rotacion),
                             Qt.TransformationMode.SmoothTransformation)
 
+    global _cache_bytes
     _CACHE[clave] = pm
-    while len(_CACHE) > _CACHE_MAX:
-        _CACHE.popitem(last=False)
+    _cache_bytes += _peso(pm)
+    while _CACHE and _cache_bytes > _CACHE_BYTES_MAX:
+        _, viejo = _CACHE.popitem(last=False)
+        _cache_bytes -= _peso(viejo)
     return pm
+
+
+def limpiar_cache() -> None:
+    """Vacía el cache de imágenes (lo usan los tests y el cierre de la vista)."""
+    global _cache_bytes
+    _CACHE.clear()
+    _cache_bytes = 0
+
+
+def escalar_para(etiqueta: QLabel, ruta: str | Path, rotacion: int = 0, *,
+                 tope: int = LADO_PREVIA_MAX) -> QPixmap:
+    """Devuelve la imagen lista para poner en `etiqueta`, sin agrandarla.
+
+    El error que corrige: leer siempre a un tope fijo y después escalar al
+    widget. Si el widget era más grande que ese tope —y el panel de la
+    vista previa crece con la ventana— el resultado se **agrandaba**, y se
+    veía blando. Medido antes del arreglo: 1,14× en una ventana de 1000 px
+    y 2,63× en una de 2560.
+
+    Acá se pide la imagen al tamaño que el widget ocupa DE VERDAD, contando
+    el devicePixelRatio de la pantalla, de modo que en un monitor con
+    escalado al 150 % se lean los píxeles que hacen falta y no la mitad.
+    """
+    dpr = max(1.0, float(etiqueta.devicePixelRatioF()))
+    ancho = max(1, int(round(etiqueta.width() * dpr)))
+    alto = max(1, int(round(etiqueta.height() * dpr)))
+
+    lado = min(cuantizar(max(ancho, alto)), tope)
+    pm = leer_escalada(ruta, lado, rotacion)
+    if pm.isNull():
+        return pm
+
+    escalado = pm.scaled(QSize(ancho, alto),
+                         Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    # Sin esto, en pantallas HiDPI Qt dibujaría el pixmap al doble de
+    # tamaño en vez de usarlo para ganar nitidez.
+    escalado.setDevicePixelRatio(dpr)
+    return escalado
 
 
 def dimensiones(ruta: str | Path) -> tuple[int, int]:
@@ -337,13 +412,12 @@ class FilaEscaneada(QFrame):
             repolish(self.lbl_detalle)
             return
 
-        pm = leer_escalada(pagina.ruta, LADO_MINIATURA, pagina.rotacion)
+        pm = escalar_para(self.lbl_thumb, pagina.ruta, pagina.rotacion,
+                          tope=LADO_MINIATURA * 4)
         if pm.isNull():
             self.lbl_thumb.clear()
         else:
-            self.lbl_thumb.setPixmap(pm.scaled(
-                self.lbl_thumb.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            self.lbl_thumb.setPixmap(pm)
 
         origen = "Escaneada" if pagina.origen == "escaner" else "Importada"
         self.lbl_titulo.setText(f"Página {numero}")
@@ -670,17 +744,14 @@ class VistaEscanearAPdf(QWidget):
             self.aviso_previa.hide()
             return
 
-        pm = leer_escalada(pagina.ruta, LADO_PREVIA, pagina.rotacion)
+        pm = escalar_para(self.lbl_previa, pagina.ruta, pagina.rotacion)
         if pm.isNull():
             self.lbl_previa.setText("No se pudo leer la imagen")
             self.aviso_previa.mostrar(
                 "El archivo de esta página ya no está o no se puede leer. "
                 "Quitala de la lista y volvé a escanearla.", "err")
         else:
-            disponible = self.lbl_previa.size()
-            self.lbl_previa.setPixmap(pm.scaled(
-                disponible, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            self.lbl_previa.setPixmap(pm)
             self.aviso_previa.setVisible(False)
 
         numero = self.doc.indice_de(pagina.id) + 1
@@ -759,6 +830,9 @@ class VistaEscanearAPdf(QWidget):
         if respuesta == QMessageBox.StandardButton.Yes:
             self.doc.limpiar()
             self._seleccionada = None
+            # Esas imágenes ya no se pueden ver: no tiene sentido seguir
+            # ocupando el presupuesto del cache con ellas.
+            limpiar_cache()
             self._refrescar()
 
     # ── Entrada de imágenes ───────────────────────────────────────────────────
@@ -908,6 +982,7 @@ class VistaEscanearAPdf(QWidget):
         if respuesta == QMessageBox.StandardButton.Yes:
             self.doc.limpiar()
             self._seleccionada = None
+            limpiar_cache()
         self._refrescar()
 
     def _on_error_guardado(self, mensaje: str) -> None:
@@ -998,4 +1073,5 @@ class VistaEscanearAPdf(QWidget):
         except (TypeError, RuntimeError):
             pass
         self.limpiar_temporales()
+        limpiar_cache()
         super().closeEvent(event)

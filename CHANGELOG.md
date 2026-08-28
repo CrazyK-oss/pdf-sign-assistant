@@ -20,6 +20,12 @@ Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 - Las notas se muestran en un `QTextBrowser` con enlaces clicables, y el diálogo abre con el foco en **Actualizar ahora** en vez de en el panel de texto
 - El README ya no duplica el changelog: lo enlaza
 
+**Vista previa nítida**
+- **La vista previa se veía blanda porque se agrandaba.** Se leía con un tope fijo de 420 px y después se escalaba al panel, pero el panel crece con la ventana: medido, agrandaba 1,14× en una ventana de 1000 px y **2,63× en una de 2560**. Ahora se pide la imagen al tamaño que el panel ocupa de verdad, así que nunca se estira
+- En pantallas con escalado (125 %, 150 %) tampoco se contemplaba el `devicePixelRatio`, que era la otra mitad del mismo problema. Ahora la previa y las miniaturas piden los píxeles reales del monitor
+- El cache de imágenes pasó a acotarse **por bytes** (96 MB) en vez de por cantidad de entradas. El tope de 160 entradas estaba pensado para miniaturas de medio mega; con la previa pidiendo pixmaps de varios MB, esas mismas 160 entradas habrían permitido más de un gigabyte sin que nadie lo notara
+- Al vaciar el documento o cerrar la herramienta, el cache se libera
+
 ## 0.11.0 — Caja de herramientas y UI nueva
 
 **Iconos que se ven en todas las máquinas**
