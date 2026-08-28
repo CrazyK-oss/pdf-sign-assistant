@@ -26,7 +26,7 @@ pytest.importorskip("PIL", reason="Necesita Pillow")
 import pymupdf  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from modules.documento_escaneado import DocumentoEscaneado  # noqa: E402
+from modules.documento import Documento  # noqa: E402
 from modules.herramienta_escaneo import _WorkerArmarPDF  # noqa: E402
 
 pytestmark = pytest.mark.integracion
@@ -83,7 +83,7 @@ def test_las_paginas_salen_en_el_orden_de_la_lista(app, tmp_path):
     Se arma rojo-azul-verde, se sube el verde al principio y se comprueba
     que el PDF quede verde-rojo-azul.
     """
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(imagen(tmp_path / "r.png", ROJO))
     doc.agregar(imagen(tmp_path / "a.png", AZUL))
     verde = doc.agregar(imagen(tmp_path / "v.png", VERDE))
@@ -107,7 +107,7 @@ def test_las_paginas_salen_en_el_orden_de_la_lista(app, tmp_path):
 
 def test_la_rotacion_se_aplica_a_la_pagina_correcta(app, tmp_path):
     """Girar 90° una hoja apaisada debe dar una página vertical, y sólo esa."""
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(imagen(tmp_path / "vertical.png", ROJO, tamano=(620, 876)))
     apaisada = doc.agregar(
         imagen(tmp_path / "apaisada.png", AZUL, tamano=(876, 620)))
@@ -128,7 +128,7 @@ def test_la_rotacion_se_aplica_a_la_pagina_correcta(app, tmp_path):
 
 
 def test_una_sola_pagina(app, tmp_path):
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(imagen(tmp_path / "unica.png", VERDE))
 
     destino = tmp_path / "una.pdf"
@@ -144,7 +144,7 @@ def test_una_sola_pagina(app, tmp_path):
 
 def test_muchas_paginas_conservan_el_orden(app, tmp_path):
     """Con 12 páginas cualquier error de índice se hace visible."""
-    doc = DocumentoEscaneado()
+    doc = Documento()
     grises = [(20 * i + 20, 20 * i + 20, 20 * i + 20) for i in range(12)]
     for i, g in enumerate(grises):
         doc.agregar(imagen(tmp_path / f"g{i:02d}.png", g, tamano=(300, 420)))
@@ -165,7 +165,7 @@ def test_muchas_paginas_conservan_el_orden(app, tmp_path):
 
 def test_falla_si_falta_una_imagen(app, tmp_path):
     """Mejor avisar que escribir un PDF al que le falta una hoja."""
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(imagen(tmp_path / "existe.png", ROJO))
     doc.agregar(tmp_path / "no_existe.png")
 
@@ -185,7 +185,7 @@ def test_sin_paginas_no_escribe_nada(app, tmp_path):
 
 def test_no_queda_basura_parcial_al_fallar(app, tmp_path):
     """El archivo .parcial de la escritura en dos pasos tiene que limpiarse."""
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(tmp_path / "fantasma.png")
 
     destino = tmp_path / "salida.pdf"
@@ -198,7 +198,7 @@ def test_sobrescribir_un_pdf_existente(app, tmp_path):
     destino = tmp_path / "existente.pdf"
     destino.write_bytes(b"contenido viejo que no es un PDF")
 
-    doc = DocumentoEscaneado()
+    doc = Documento()
     doc.agregar(imagen(tmp_path / "nueva.png", AZUL))
 
     assert ejecutar(app, doc.paginas, destino) == []
