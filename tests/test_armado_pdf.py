@@ -501,3 +501,23 @@ def test_armar_varios_conserva_lo_que_ya_habia_escrito(fuente, tmp_path):
     assert (tmp_path / "p1.pdf").is_file()
     assert (tmp_path / "p3.pdf").is_file()
     assert not (tmp_path / "roto.pdf").exists()
+
+
+def test_guardar_encima_del_pdf_que_se_abrio(fuente):
+    """Lo más natural del mundo: abrir un PDF, sacarle una página y
+    guardar con el mismo nombre.
+
+    El PDF de origen se lee a memoria justo por esto: en Windows no se
+    puede renombrar sobre un archivo abierto, y el motor escribe a un
+    temporal y renombra.
+    """
+    salida = armar_pdf(paginas_pdf(fuente, [0, 2]), fuente)
+    assert salida == fuente
+    assert textos_de(fuente) == ["UNO", "TRES"]
+
+
+def test_guardar_encima_de_uno_de_varios_origenes(fuente, tmp_path):
+    otro = pdf_con_texto(tmp_path / "otro.pdf", ["X"])
+    salida = armar_pdf(paginas_pdf(fuente, [1]) + paginas_pdf(otro, [0]), otro)
+    assert textos_de(salida) == ["DOS", "X"]
+    assert textos_de(fuente) == ["UNO", "DOS", "TRES"], "el otro origen intacto"

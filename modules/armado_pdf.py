@@ -27,6 +27,7 @@ pantalla queda como un envoltorio de tres líneas.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from collections.abc import Callable, Iterable, Sequence
@@ -198,7 +199,13 @@ def armar_pdf(paginas: Sequence, destino: str | Path, *,
             if getattr(pagina, "es_pdf", pagina.origen == ORIGEN_PDF):
                 clave = str(ruta)
                 if clave not in lectores:
-                    lectores[clave] = PdfReader(clave)
+                    # A memoria, no desde el archivo: el destino puede ser
+                    # el MISMO PDF que se está leyendo (guardar encima de
+                    # lo que se abrió es lo más natural del mundo), y en
+                    # Windows no se puede renombrar sobre un archivo que
+                    # está abierto. Leerlo entero cuesta RAM proporcional
+                    # al PDF y evita el problema de raíz.
+                    lectores[clave] = PdfReader(io.BytesIO(ruta.read_bytes()))
                     if getattr(lectores[clave], "is_encrypted", False):
                         try:
                             lectores[clave].decrypt("")   # type: ignore[attr-defined]
