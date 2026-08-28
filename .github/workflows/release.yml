@@ -68,6 +68,25 @@ jobs:
           fi
           echo "Tag y versión coinciden: $proyecto"
 
+      # Las notas del Release salen de CHANGELOG.md, no de una plantilla
+      # fija. El actualizador interno muestra ese mismo texto al avisar
+      # que hay versión nueva, así que si esto quedara vacío el usuario
+      # vería un aviso que no le dice qué cambió.
+      #
+      # `python -m modules.changelog` sale con código 1 si la versión no
+      # tiene sección: mejor frenar el build que publicar notas vacías.
+      - name: Extraer los cambios del CHANGELOG
+        shell: bash
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          if ! python -m modules.changelog "$ver" > cambios.md; then
+            echo "::error::CHANGELOG.md no tiene una sección para $ver."
+            echo "Agregá un encabezado '## $ver — Título' con los cambios."
+            exit 1
+          fi
+          echo "Cambios extraídos ($(wc -l < cambios.md) líneas):"
+          cat cambios.md
+
       - name: Compilar con PyInstaller
         run: pyinstaller pdf_sign_assistant.spec --noconfirm
 
@@ -160,13 +179,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ver="${{ steps.version.outputs.version }}"
-          notas="$(cat <<EOF
+
+          # Orden deliberado: primero QUÉ CAMBIÓ, después cómo descargar.
+          # El actualizador interno corta en la sentinela y muestra sólo la
+          # primera mitad, que es lo único que le interesa a quien ya tiene
+          # la app instalada.
+          instrucciones="$(cat <<EOF
           ## Descargar
 
           | Archivo | Para quién |
           |---------|-----------|
           | \`PDFSignAssistant-$ver-Setup.exe\` | **La mayoría.** Instalador normal: no pide permisos de administrador y crea el acceso directo. |
           | \`PDFSignAssistant-$ver-portable.zip\` | Sin instalar nada (por ejemplo, desde un pendrive). Descomprimir y ejecutar. |
+
+          > Si ya tenés la aplicación instalada no hace falta que bajes nada:
+          > te va a avisar sola y se actualiza desde adentro.
 
           ### La primera vez, Windows va a advertirte
 
@@ -184,12 +211,29 @@ jobs:
 
           ---
 
-          El detalle de los cambios está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/main/README.md#changelog).
+          El historial completo está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/main/CHANGELOG.md).
           EOF
           )"
+
+          # La sentinela sale de modules/changelog.py, para no tener el
+          # mismo literal escrito en dos lados.
+          centinela="$(python -c 'from modules.changelog import SENTINELA; print(SENTINELA)')"
+
+          {
+            cat cambios.md
+            printf '\n\n%s\n\n' "$centinela"
+            printf '%s\n' "$instrucciones"
+          } > notas.md
+
+          # El título del CHANGELOG es opcional: si esa versión no lo
+          # tiene, el Release se llama sólo por su número.
+          subtitulo="$(python -m modules.changelog --titulo "$ver")"
+          titulo="PDF Sign Assistant $ver"
+          [ -n "$subtitulo" ] && titulo="$titulo — $subtitulo"
+
           gh release create "$GITHUB_REF_NAME" \
             dist/installer/*.exe \
             dist/installer/*.zip \
             dist/installer/SHA256SUMS.txt \
-            --title "PDF Sign Assistant $ver" \
-            --notes "$notas"
+            --title "$titulo" \
+            --notes-file notas.md

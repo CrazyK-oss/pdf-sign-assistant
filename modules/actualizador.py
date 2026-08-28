@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
     QProgressBar,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
 )
 
@@ -38,6 +38,7 @@ from modules.actualizaciones import (
     parsear_version,
     toca_comprobar,
 )
+from modules.changelog import notas_de_cambios
 from modules.theme import SIZE, SPACE, repolish
 from modules.ui import (
     FilaAdaptable,
@@ -65,6 +66,7 @@ __all__ = [
     "hay_version_nueva",
     "lanzar_instalador",
     "marcar_comprobacion",
+    "notas_de_cambios",
     "parsear_version",
     "toca_comprobar",
 ]
@@ -158,14 +160,21 @@ class DialogoActualizacion(QDialog):
         lay.addWidget(separador())
         lay.addSpacing(SPACE["sm"])
 
-        lay.addWidget(etiqueta("Novedades", rol="subtitulo"))
-        notas = QTextEdit()
-        notas.setReadOnly(True)
+        lay.addWidget(etiqueta("Qué cambió", rol="subtitulo"))
+        notas = QTextBrowser()
+        notas.setOpenExternalLinks(True)     # los enlaces abren el navegador
         notas.setProperty("readonly", "true")
         repolish(notas)
-        texto = self.info.notas or "Sin notas publicadas."
-        # Las notas de un Release vienen en Markdown; sin renderizar se
-        # leían con los '##' y los '-' a la vista.
+
+        # Sólo la parte de cambios: el cuerpo del Release trae después las
+        # instrucciones de descarga, que acá no vienen al caso —la app ya
+        # está por descargar el instalador sola.
+        texto = notas_de_cambios(self.info.notas)
+        if not texto:
+            texto = (f"El release {self.info.version} no publicó notas.\n\n"
+                     f"Podés ver los cambios en {self.info.url_pagina}")
+        # Vienen en Markdown; sin renderizar se leían con los '##' y los
+        # '-' a la vista.
         try:
             notas.setMarkdown(texto)
         except (AttributeError, TypeError):
@@ -211,6 +220,12 @@ class DialogoActualizacion(QDialog):
                 "la carpeta manualmente.", rol="hint", wrap=True))
         acciones.agregar(self.btn_principal)
         lay.addWidget(acciones)
+
+        # Sin esto el foco arranca en el panel de notas —es lo primero
+        # enfocable— y el diálogo abre con un recuadro resaltado alrededor
+        # de un texto que no se edita. Además, así Enter actualiza.
+        self.btn_principal.setDefault(True)
+        self.btn_principal.setFocus()
 
     # ── Acciones ──────────────────────────────────────────────────────
     def _abrir_pagina(self):
