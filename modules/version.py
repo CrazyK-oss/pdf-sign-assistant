@@ -9,13 +9,18 @@ La leen:
   - installer/pdf_sign_assistant.iss (versión del instalador)
   - .github/workflows/release.yml (nombre de los artefactos)
 
-Al publicar: subir el número acá, commitear y crear el tag `vX.Y.Z`.
-El workflow verifica que el tag coincida con este valor.
+Al publicar: subir el número acá, agregarle su sección a CHANGELOG.md,
+commitear y crear el tag `vX.Y.Z`.
+
+El workflow verifica que el tag coincida con este valor, y que la versión
+tenga su entrada en el CHANGELOG: de ahí salen las notas del Release y lo
+que muestra el actualizador interno. Un test lo comprueba antes, así el
+olvido no llega a gastar un build de Windows.
 """
 
 from __future__ import annotations
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 APP_NOMBRE = "PDF Sign Assistant"
 APP_ID = "pdf-sign-assistant"

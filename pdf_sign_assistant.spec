@@ -125,6 +125,7 @@ hiddenimports = [
     "pywintypes",
     "modules.actualizaciones",
     "modules.actualizador",
+    "modules.changelog",
     "modules.dispositivos",
     "modules.documento_escaneado",
     "modules.errores",
