@@ -13,31 +13,20 @@ Reparto de responsabilidades
 ----------------------------
   modules/documento.py    qué páginas hay y en qué orden (sin Qt)
   modules/armado_pdf.py   escribe el PDF final (sin Qt)
+  modules/previa.py       dibuja una página al tamaño en que se la ve
   modules/escaner_qt.py   el hilo que habla con WIA
   modules/imagen_pdf.py   imagen → PDF de una página
   este módulo             solamente la pantalla
 
 Detalles que importan
 ---------------------
-* **Las imágenes se leen a escala, y a la escala correcta.** Un escaneo A4
-  a 300 DPI son unos 8,7 millones de píxeles; cargarlo entero con QPixmap
-  para mostrarlo de 92 px de alto son ~35 MB de RAM por página. Con
-  QImageReader.setScaledSize el decodificador entrega la imagen ya chica.
-  Pero "chica" no es un número fijo: la miniatura y la vista previa piden
-  cada una el tamaño que ocupan de verdad —el panel de la previa crece con
-  la ventana— multiplicado por el devicePixelRatio de la pantalla. Con un
-  tope fijo, la previa terminaba AGRANDANDO la imagen y se veía blanda.
-* **El cache se acota por bytes**, no por cantidad de entradas: los pixmaps
-  de la previa pesan varios MB y un tope contado en entradas no dice nada
-  sobre la memoria que se está usando.
 * **Se escanea a 300 DPI**, no a 600 como al firmar: acá se trata de
   documentos, y a 600 un PDF de 20 páginas se va a cientos de megas sin
   ganar nada legible.
-* **El PDF se escribe a un temporal y recién después se renombra.** Si el
-  proceso muere a mitad de la escritura, el archivo que el usuario ya
-  tenía no queda truncado.
 * **Las páginas se identifican por id, no por posición**: la posición
   cambia con cada reordenamiento y usarla lleva a borrar la equivocada.
+* Cómo se leen las imágenes sin comerse la RAM, y por qué la previa se
+  pide al tamaño real del panel, está explicado en modules/previa.py.
 """
 
 from __future__ import annotations
@@ -45,11 +34,10 @@ from __future__ import annotations
 import logging
 import os
 import traceback
-from collections import OrderedDict
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QImageReader, QPixmap, QTransform
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -84,6 +72,12 @@ from modules.imagen_pdf import (
     opciones_calidad,
     siguiente_mas_liviana,
 )
+from modules.previa import (
+    LADO_MINIATURA,
+    dimensiones,
+    escalar_para,
+    limpiar_cache,
+)
 from modules.theme import BREAKPOINT, SIZE, SPACE, repolish, theme_signals
 from modules.ui import (
     AreaScroll,
@@ -104,137 +98,6 @@ from modules.ui import (
 log = logging.getLogger(__name__)
 
 FILTRO_IMG = "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif)"
-
-#: Alto de la miniatura de la lista, en píxeles lógicos.
-LADO_MINIATURA = 92
-
-#: Tope de la vista previa. NO es el tamaño al que se lee: la previa se
-#: lee al tamaño que realmente ocupa el panel (que crece con la ventana)
-#: por el devicePixelRatio de la pantalla. Este número sólo evita que en
-#: un monitor enorme se decodifique la imagen casi entera.
-LADO_PREVIA_MAX = 1800
-
-#: Los pedidos de tamaño se redondean hacia arriba a un múltiplo de esto.
-#: Sin cuantizar, arrastrar el borde de la ventana pediría un tamaño
-#: distinto por cada píxel y el cache no serviría de nada.
-PASO_TAMANO = 128
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Lectura de imágenes a escala
-# ═══════════════════════════════════════════════════════════════════════════════
-
-#: (ruta, mtime, lado, rotación) → QPixmap.
-#:
-#: El cache se acota por BYTES y no por cantidad de entradas: la vista
-#: previa puede pedir pixmaps de varios MB, y un tope de "160 entradas"
-#: que estaba bien para miniaturas de 0,5 MB pasaría a permitir más de un
-#: gigabyte sin que nadie lo note.
-_CACHE: OrderedDict[tuple, QPixmap] = OrderedDict()
-_CACHE_BYTES_MAX = 96 * 1024 * 1024
-_cache_bytes = 0
-
-
-def _peso(pm: QPixmap) -> int:
-    """Bytes que ocupa un pixmap en memoria (4 por píxel)."""
-    return max(0, pm.width() * pm.height() * 4)
-
-
-def cuantizar(lado: int, paso: int = PASO_TAMANO) -> int:
-    """Redondea hacia arriba al múltiplo de `paso` (mínimo, un paso)."""
-    lado = max(1, int(lado))
-    return max(paso, -(-lado // paso) * paso)
-
-
-def leer_escalada(ruta: str | Path, lado_max: int, rotacion: int = 0) -> QPixmap:
-    """Carga una imagen ya reducida, sin pasar por el original completo.
-
-    QPixmap(ruta) decodifica a tamaño completo y recién después permite
-    escalar: con escaneos de 300 DPI eso son decenas de MB por página.
-    QImageReader.setScaledSize() le pide al decodificador la imagen chica
-    directamente.
-    """
-    try:
-        mtime = Path(ruta).stat().st_mtime
-    except OSError:
-        return QPixmap()
-
-    clave = (str(ruta), mtime, lado_max, rotacion % 360)
-    cacheado = _CACHE.get(clave)
-    if cacheado is not None:
-        _CACHE.move_to_end(clave)
-        return cacheado
-
-    lector = QImageReader(str(ruta))
-    lector.setAutoTransform(True)          # respeta la orientación EXIF
-    tam = lector.size()
-    if tam.isValid() and tam.width() > 0 and tam.height() > 0:
-        escala = min(lado_max / tam.width(), lado_max / tam.height(), 1.0)
-        if escala < 1.0:
-            lector.setScaledSize(QSize(max(1, round(tam.width() * escala)),
-                                       max(1, round(tam.height() * escala))))
-    imagen = lector.read()
-    if imagen.isNull():
-        log.debug("No se pudo leer la imagen %s: %s", ruta, lector.errorString())
-        return QPixmap()
-
-    pm = QPixmap.fromImage(imagen)
-    if rotacion % 360:
-        pm = pm.transformed(QTransform().rotate(rotacion),
-                            Qt.TransformationMode.SmoothTransformation)
-
-    global _cache_bytes
-    _CACHE[clave] = pm
-    _cache_bytes += _peso(pm)
-    while _CACHE and _cache_bytes > _CACHE_BYTES_MAX:
-        _, viejo = _CACHE.popitem(last=False)
-        _cache_bytes -= _peso(viejo)
-    return pm
-
-
-def limpiar_cache() -> None:
-    """Vacía el cache de imágenes (lo usan los tests y el cierre de la vista)."""
-    global _cache_bytes
-    _CACHE.clear()
-    _cache_bytes = 0
-
-
-def escalar_para(etiqueta: QLabel, ruta: str | Path, rotacion: int = 0, *,
-                 tope: int = LADO_PREVIA_MAX) -> QPixmap:
-    """Devuelve la imagen lista para poner en `etiqueta`, sin agrandarla.
-
-    El error que corrige: leer siempre a un tope fijo y después escalar al
-    widget. Si el widget era más grande que ese tope —y el panel de la
-    vista previa crece con la ventana— el resultado se **agrandaba**, y se
-    veía blando. Medido antes del arreglo: 1,14× en una ventana de 1000 px
-    y 2,63× en una de 2560.
-
-    Acá se pide la imagen al tamaño que el widget ocupa DE VERDAD, contando
-    el devicePixelRatio de la pantalla, de modo que en un monitor con
-    escalado al 150 % se lean los píxeles que hacen falta y no la mitad.
-    """
-    dpr = max(1.0, float(etiqueta.devicePixelRatioF()))
-    ancho = max(1, int(round(etiqueta.width() * dpr)))
-    alto = max(1, int(round(etiqueta.height() * dpr)))
-
-    lado = min(cuantizar(max(ancho, alto)), tope)
-    pm = leer_escalada(ruta, lado, rotacion)
-    if pm.isNull():
-        return pm
-
-    escalado = pm.scaled(QSize(ancho, alto),
-                         Qt.AspectRatioMode.KeepAspectRatio,
-                         Qt.TransformationMode.SmoothTransformation)
-    # Sin esto, en pantallas HiDPI Qt dibujaría el pixmap al doble de
-    # tamaño en vez de usarlo para ganar nitidez.
-    escalado.setDevicePixelRatio(dpr)
-    return escalado
-
-
-def dimensiones(ruta: str | Path) -> tuple[int, int]:
-    """Ancho y alto en píxeles sin decodificar la imagen entera."""
-    tam = QImageReader(str(ruta)).size()
-    return (tam.width(), tam.height()) if tam.isValid() else (0, 0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -368,8 +231,7 @@ class FilaEscaneada(QFrame):
             repolish(self.lbl_detalle)
             return
 
-        pm = escalar_para(self.lbl_thumb, pagina.ruta, pagina.rotacion,
-                          tope=LADO_MINIATURA * 4)
+        pm = escalar_para(self.lbl_thumb, pagina, tope=LADO_MINIATURA * 4)
         if pm.isNull():
             self.lbl_thumb.clear()
         else:
@@ -378,7 +240,7 @@ class FilaEscaneada(QFrame):
         origen = "Escaneada" if pagina.origen == "escaner" else "Importada"
         self.lbl_titulo.setText(f"Página {numero}")
 
-        ancho, alto = dimensiones(pagina.ruta)
+        ancho, alto = dimensiones(pagina)
         partes = [origen]
         if ancho and alto:
             partes.append(f"{ancho}×{alto} px")
@@ -716,7 +578,7 @@ class VistaEscanearAPdf(QWidget):
             self.aviso_previa.hide()
             return
 
-        pm = escalar_para(self.lbl_previa, pagina.ruta, pagina.rotacion)
+        pm = escalar_para(self.lbl_previa, pagina)
         if pm.isNull():
             self.lbl_previa.setText("No se pudo leer la imagen")
             self.aviso_previa.mostrar(
@@ -727,7 +589,7 @@ class VistaEscanearAPdf(QWidget):
             self.aviso_previa.setVisible(False)
 
         numero = self.doc.indice_de(pagina.id) + 1
-        ancho, alto = dimensiones(pagina.ruta)
+        ancho, alto = dimensiones(pagina)
         detalle = f"Página {numero} de {self.doc.total}"
         if ancho and alto:
             detalle += f"  ·  {ancho}×{alto} px"
