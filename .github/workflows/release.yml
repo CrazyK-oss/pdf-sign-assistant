@@ -30,6 +30,12 @@ on:
           Crear el tag y publicar el Release (si no, sólo compila)
         type: boolean
         default: false
+      rehacer_notas:
+        description: >-
+          Sólo regenerar las notas de un Release ya publicado, sin
+          recompilar (usa la versión de modules/version.py)
+        type: boolean
+        default: false
 
 permissions:
   contents: write        # necesario para crear el Release
@@ -38,6 +44,12 @@ jobs:
   build-windows:
     name: Compilar para Windows
     runs-on: windows-latest
+    if: inputs.rehacer_notas != true
+    env:
+      # Windows usa cp1252 por defecto y las tildes salen rotas en
+      # cualquier redirección. modules/changelog.py ya lo fuerza por su
+      # cuenta; esto cubre al resto de las llamadas a Python.
+      PYTHONUTF8: "1"
 
     steps:
       - uses: actions/checkout@v5
@@ -118,24 +130,20 @@ jobs:
           fi
           echo "$tag está libre."
 
-      # Las notas del Release salen de CHANGELOG.md, no de una plantilla
-      # fija. El actualizador interno muestra ese mismo texto al avisar
-      # que hay versión nueva, así que si esto quedara vacío el usuario
-      # vería un aviso que no le dice qué cambió.
-      #
-      # `python -m modules.changelog` sale con código 1 si la versión no
-      # tiene sección: mejor frenar el build que publicar notas vacías.
-      - name: Extraer los cambios del CHANGELOG
+      # Se valida acá y no al publicar: si el CHANGELOG no tiene la
+      # sección, mejor enterarse en 20 segundos que después de compilar
+      # el .exe y armar el instalador.
+      - name: Verificar que haya notas para esta versión
+        if: steps.modo.outputs.publicar == 'true'
         shell: bash
         run: |
           ver="${{ steps.version.outputs.version }}"
-          if ! python -m modules.changelog "$ver" > cambios.md; then
+          if ! python -m modules.changelog --notas "$ver" > /dev/null; then
             echo "::error::CHANGELOG.md no tiene una sección para $ver."
             echo "Agregá un encabezado '## $ver — Título' con los cambios."
             exit 1
           fi
-          echo "Cambios extraídos ($(wc -l < cambios.md) líneas):"
-          cat cambios.md
+          echo "Notas listas para $ver."
 
       - name: Compilar con PyInstaller
         run: pyinstaller pdf_sign_assistant.spec --noconfirm
@@ -227,54 +235,17 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PYTHONUTF8: "1"
         run: |
           ver="${{ steps.version.outputs.version }}"
           tag="${{ steps.modo.outputs.tag }}"
 
-          # Orden deliberado: primero QUÉ CAMBIÓ, después cómo descargar.
-          # El actualizador interno corta en la sentinela y muestra sólo la
-          # primera mitad, que es lo único que le interesa a quien ya tiene
-          # la app instalada.
-          instrucciones="$(cat <<EOF
-          ## Descargar
-
-          | Archivo | Para quién |
-          |---------|-----------|
-          | \`PDFSignAssistant-$ver-Setup.exe\` | **La mayoría.** Instalador normal: no pide permisos de administrador y crea el acceso directo. |
-          | \`PDFSignAssistant-$ver-portable.zip\` | Sin instalar nada (por ejemplo, desde un pendrive). Descomprimir y ejecutar. |
-
-          > Si ya tenés la aplicación instalada no hace falta que bajes nada:
-          > te va a avisar sola y se actualiza desde adentro.
-
-          ### La primera vez, Windows va a advertirte
-
-          La aplicación **no está firmada digitalmente**, así que SmartScreen muestra
-          *"Windows protegió su PC"*. Para continuar: **Más información → Ejecutar de todas formas**.
-
-          Podés verificar la integridad de la descarga con \`SHA256SUMS.txt\`.
-
-          ### Dónde quedan tus archivos
-
-          - Documentos firmados: \`Documentos\\PDF Sign Assistant\`
-          - Configuración y logs: \`%LOCALAPPDATA%\\PDF Sign Assistant\`
-
-          Al desinstalar, **tus documentos no se borran**.
-
-          ---
-
-          El historial completo está en el [CHANGELOG](https://github.com/CrazyK-oss/pdf-sign-assistant/blob/$tag/CHANGELOG.md).
-          EOF
-          )"
-
-          # La sentinela sale de modules/changelog.py, para no tener el
-          # mismo literal escrito en dos lados.
-          centinela="$(python -c 'from modules.changelog import SENTINELA; print(SENTINELA)')"
-
-          {
-            cat cambios.md
-            printf '\n\n%s\n\n' "$centinela"
-            printf '%s\n' "$instrucciones"
-          } > notas.md
+          # El cuerpo entero —cambios, sentinela e instrucciones— lo arma
+          # modules/changelog.py, que además fuerza UTF-8 en la salida.
+          # Sin eso, en Windows el redirect usa cp1252 y GitHub muestra un
+          # rombo con interrogación en cada tilde (pasó en la 0.12.0).
+          python -m modules.changelog --notas "$ver" "$tag" > notas.md
+          echo "Notas generadas ($(wc -l < notas.md) líneas)"
 
           # El título del CHANGELOG es opcional: si esa versión no lo
           # tiene, el Release se llama sólo por su número.
@@ -297,3 +268,46 @@ jobs:
             --title "$titulo" \
             --notes-file notas.md \
             "${destino[@]}"
+
+  # ── Corregir las notas de un Release ya publicado ──────────────────────
+  # Las notas salen del CHANGELOG, así que arreglar una errata (o un
+  # problema de codificación como el de la 0.12.0) no debería obligar a
+  # recompilar el .exe entero en Windows. Este job sólo las regenera.
+  notas:
+    name: Regenerar las notas del Release
+    runs-on: ubuntu-latest
+    if: inputs.rehacer_notas == true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Regenerar y publicar las notas
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUTF8: "1"
+        run: |
+          ver="$(python -m modules.version)"
+          tag="v$ver"
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::No existe el release $tag. Este job corrige las"
+            echo "notas de un release ya publicado; para crear uno nuevo usá"
+            echo "la opción 'publicar'."
+            exit 1
+          fi
+
+          python -m modules.changelog --notas "$ver" "$tag" > notas.md
+          subtitulo="$(python -m modules.changelog --titulo "$ver")"
+          titulo="PDF Sign Assistant $ver"
+          [ -n "$subtitulo" ] && titulo="$titulo — $subtitulo"
+
+          echo "── Notas nuevas ──"
+          cat notas.md
+
+          gh release edit "$tag" --title "$titulo" --notes-file notas.md
+          echo "Notas de $tag actualizadas."

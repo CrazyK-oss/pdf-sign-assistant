@@ -16,6 +16,7 @@ Todo es Python puro: corre en el CI liviano.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,9 @@ import pytest
 from modules.changelog import (
     SENTINELA,
     cuerpo_release,
+    instrucciones_descarga,
     notas_de_cambios,
+    notas_release,
     ruta_changelog,
     seccion,
     titulo,
@@ -222,3 +225,96 @@ def test_las_versiones_ya_publicadas_siguen_teniendo_seccion(version):
     """Si alguien reordena el CHANGELOG y se lleva puesta una entrada
     vieja, se pierde el historial que enlaza cada release."""
     assert seccion(version)
+
+# ── Codificación de la salida ─────────────────────────────────────────────────
+
+def _ejecutar_en_consola_no_utf8(*argumentos):
+    """Como en el runner de Windows, donde la consola es cp1252."""
+    entorno = dict(os.environ, PYTHONIOENCODING="cp1252")
+    return subprocess.run(
+        [sys.executable, "-m", "modules.changelog", *argumentos],
+        capture_output=True, cwd=RAIZ, env=entorno)      # bytes, sin decodificar
+
+
+def test_la_salida_es_utf8_aunque_la_consola_no_lo_sea():
+    """El bug que salió publicado en la 0.12.0.
+
+    En Windows, `python -m modules.changelog > cambios.md` escribía con la
+    codificación local (cp1252): 'embebía' quedaba como b'embeb\xeda'.
+    GitHub lee las notas del Release como UTF-8, así que cada tilde
+    aparecía como un rombo con un signo de pregunta.
+    """
+    r = _ejecutar_en_consola_no_utf8(__version__)
+    assert r.returncode == 0
+
+    texto = r.stdout.decode("utf-8")      # revienta si no es UTF-8 válido
+    assert texto.strip() == seccion(__version__)
+
+
+def test_el_titulo_tambien_sale_en_utf8():
+    r = _ejecutar_en_consola_no_utf8("--titulo", __version__)
+    assert r.returncode == 0
+    assert r.stdout.decode("utf-8").strip() == titulo(__version__)
+
+
+def test_el_changelog_tiene_acentos_que_verificar():
+    """Salvaguarda de los dos tests de arriba: si el CHANGELOG fuera todo
+    ASCII pasarían en verde sin comprobar nada."""
+    acentuados = set("áéíóúñÁÉÍÓÚÑ¿¡—")
+    texto = ruta_changelog().read_text(encoding="utf-8")
+    assert acentuados & set(texto), "el CHANGELOG no tiene caracteres no-ASCII"
+    assert acentuados & set(seccion(__version__)), (
+        f"la sección de {__version__} no tiene acentos que probar")
+
+
+# ── El cuerpo completo del Release ────────────────────────────────────────────
+
+def test_las_notas_llevan_los_cambios_primero():
+    cuerpo = notas_release(__version__, f"v{__version__}")
+    assert cuerpo.index(SENTINELA) < cuerpo.index("## Descargar")
+    assert notas_de_cambios(cuerpo) == seccion(__version__)
+
+
+def test_el_enlace_al_changelog_apunta_al_tag_y_no_a_main():
+    """Una versión se puede publicar desde una rama sin mergear: el enlace
+    a main daría 404 hasta que alguien la integre."""
+    cuerpo = notas_release("0.12.0", "v0.12.0")
+    assert "blob/v0.12.0/CHANGELOG.md" in cuerpo
+    assert "blob/main/CHANGELOG.md" not in cuerpo
+
+
+def test_sin_tag_el_enlace_se_deduce_de_la_version():
+    assert "blob/v1.2.3/" in instrucciones_descarga("1.2.3")
+
+
+def test_las_instrucciones_nombran_los_archivos_de_esa_version():
+    texto = instrucciones_descarga("9.9.9")
+    assert "PDFSignAssistant-9.9.9-Setup.exe" in texto
+    assert "PDFSignAssistant-9.9.9-portable.zip" in texto
+
+
+def test_las_notas_fallan_si_no_hay_seccion():
+    """Publicar notas vacías es peor que no publicar."""
+    with pytest.raises(ValueError, match="9.9.9"):
+        notas_release("9.9.9")
+
+
+def test_el_comando_notas_imprime_el_cuerpo_entero():
+    r = _ejecutar("--notas", __version__, f"v{__version__}")
+    assert r.returncode == 0
+    assert SENTINELA in r.stdout
+    assert "## Descargar" in r.stdout
+
+
+def test_el_comando_notas_falla_si_no_hay_seccion():
+    r = _ejecutar("--notas", "9.9.9")
+    assert r.returncode == 1
+    assert "9.9.9" in r.stderr
+
+
+def test_el_comando_notas_sale_en_utf8():
+    """El mismo bug de la 0.12.0, ahora sobre el cuerpo completo."""
+    r = _ejecutar_en_consola_no_utf8("--notas", __version__, f"v{__version__}")
+    assert r.returncode == 0
+    texto = r.stdout.decode("utf-8")        # revienta si no es UTF-8
+    assert "Configuración" in texto and "Más información" in texto
