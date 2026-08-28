@@ -42,6 +42,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from modules.imagen_pdf import (
+    LIMITE_CORREO_MB,
+    excede_limite,
+    formatear_peso,
+)
 from modules.theme import SIZE, SPACE, repolish
 from modules.trabajo import formatear_paginas
 from modules.ui import (
@@ -166,6 +171,12 @@ class DialogoEnviarEmail(QDialog):
             f"Se abrirá una carpeta con «{self.pdf_firmado.name}» listo para "
             "adjuntar, y tu cliente de correo con el asunto prellenado.",
             rol="hint", wrap=True))
+
+        aviso = self._aviso_tamano()
+        if aviso is not None:
+            lay.addSpacing(SPACE["sm"])
+            lay.addWidget(aviso)
+
         lay.addSpacing(SPACE["sm"])
         lay.addWidget(separador())
         lay.addSpacing(SPACE["sm"])
@@ -216,6 +227,34 @@ class DialogoEnviarEmail(QDialog):
         lay.addWidget(acciones)
 
         self._on_email_changed(self.input_email.text())
+
+    def _aviso_tamano(self) -> Aviso | None:
+        """Franja con el peso del adjunto, roja si no va a entrar.
+
+        Se muestra ANTES de abrir el cliente de correo: descubrir el límite
+        recién cuando Outlook rechaza el adjunto significa volver a firmar
+        y escanear todo.
+        """
+        try:
+            peso = self.pdf_firmado.stat().st_size
+        except OSError:
+            return None
+
+        if excede_limite(peso, LIMITE_CORREO_MB):
+            return Aviso(
+                f"El documento pesa {formatear_peso(peso)} y Outlook no "
+                f"acepta adjuntos de más de {LIMITE_CORREO_MB} MB. "
+                "Volvé a guardarlo con una calidad más liviana, o mandalo "
+                "por un enlace compartido.", tono="err")
+
+        # Por encima de la mitad del límite vale la pena decirlo: muchas
+        # organizaciones bajan el tope y el usuario no lo sabe.
+        if peso > LIMITE_CORREO_MB * 1024 * 1024 / 2:
+            return Aviso(
+                f"El documento pesa {formatear_peso(peso)}. Entra en el "
+                f"límite habitual de {LIMITE_CORREO_MB} MB, pero algunas "
+                "organizaciones lo tienen más bajo.", tono="warn")
+        return None
 
     def _on_email_changed(self, texto: str):
         texto = texto.strip()

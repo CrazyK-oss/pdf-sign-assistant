@@ -40,6 +40,7 @@ from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QBoxLayout,
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -315,6 +316,31 @@ class IconoLabel(QLabel):
 def icono_label(nombre: str, tamano: int = SIZE["icono"], *,
                 color: str = "text_muted") -> IconoLabel:
     return IconoLabel(nombre, tamano, color=color)
+
+
+def selector(opciones, *, actual: str = "", on_change=None,
+             min_w: int = 0, tooltips: dict | None = None) -> QComboBox:
+    """QComboBox estandarizado a partir de pares (clave, texto).
+
+    La clave viaja en el UserRole, así que el código nunca compara por el
+    texto visible: renombrar una opción no rompe la lógica.
+    """
+    c = QComboBox()
+    c.setMinimumHeight(SIZE["input"])
+    if min_w:
+        c.setMinimumWidth(min_w)
+    for clave, texto in opciones:
+        c.addItem(texto, clave)
+        if tooltips and clave in tooltips:
+            c.setItemData(c.count() - 1, tooltips[clave],
+                          Qt.ItemDataRole.ToolTipRole)
+    if actual:
+        i = c.findData(actual)
+        if i >= 0:
+            c.setCurrentIndex(i)
+    if on_change is not None:
+        c.currentIndexChanged.connect(lambda _i: on_change(c.currentData()))
+    return c
 
 
 def separador() -> QFrame:
@@ -804,6 +830,7 @@ __all__ = [
     "etiqueta",
     "expansor_h",
     "icono_label",
+    "selector",
     "separador",
     "separador_v",
     "sombra",

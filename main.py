@@ -341,7 +341,10 @@ class VentanaPrincipal(QMainWindow):
 
         from modules.herramienta_escaneo import VistaEscanearAPdf
 
-        vista = VistaEscanearAPdf(CARPETA_FIRMADO)
+        vista = VistaEscanearAPdf(
+            CARPETA_FIRMADO,
+            calidad_inicial=self.config.get("calidad_pdf"),
+            limite_mb=self.config.get("limite_correo_mb", 20))
         vista.volver.connect(lambda: self._ir_a(INICIO))
         vista.documento_guardado.connect(self._on_pdf_escaneado)
         self._herramienta_escaneo = vista
@@ -898,12 +901,26 @@ class VentanaPrincipal(QMainWindow):
         self._cerrar_vista("_vista_guardar")
         from modules.fase_guardar import FaseGuardar
         self._vista_guardar = FaseGuardar(
-            trabajo=self._trabajo, carpeta_firmados=CARPETA_FIRMADO, parent=self)
+            trabajo=self._trabajo, carpeta_firmados=CARPETA_FIRMADO, parent=self,
+            calidad_inicial=self.config.get("calidad_pdf"),
+            limite_mb=self.config.get("limite_correo_mb", 20))
+        self._vista_guardar.calidad_elegida.connect(self._recordar_calidad)
         self._vista_guardar.setWindowTitle("PDF Sign Assistant — Guardar documento")
         self._vista_guardar.resize(820, 640)
         self._vista_guardar.guardado_listo.connect(self._on_guardado_listo)
         self._vista_guardar.cancelado.connect(self._on_guardar_cancelado)
         self._vista_guardar.show()
+
+    def _recordar_calidad(self, clave: str):
+        """La calidad elegida se recuerda: quien la baja una vez suele
+        necesitarla siempre (su correo tiene el mismo límite mañana)."""
+        if not clave or self.config.get("calidad_pdf") == clave:
+            return
+        self.config["calidad_pdf"] = clave
+        try:
+            guardar_config(self.config, CONFIG_PATH)
+        except OSError:
+            pass
 
     def _on_guardado_listo(self, ruta_final):
         self._cerrar_vista("_vista_guardar")
