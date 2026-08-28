@@ -11,6 +11,18 @@ build falla antes de publicar.
 Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 (`vX.Y.Z`) y que `modules/version.py`. Un test lo verifica.
 
+## 0.12.1 — Arreglos de la 0.12.0
+
+**Abrir un documento reciente cerraba la aplicación**
+- Desde la pantalla de inicio, hacer clic en un documento reciente mostraba *"emit(): argument 1 has unexpected type 'bool'"* y la app se cerraba
+- La causa: `QPushButton.clicked` emite un booleano con el estado del botón, y PyQt se lo pasa al slot si éste acepta un argumento. Eso pisaba con `False` el valor por defecto de la lambda que llevaba la ruta del documento — el patrón habitual para capturar una variable de bucle
+- El arreglo va en el kit de botones, no en ese sitio: ahora el clic se conecta descartando el argumento de Qt, así que la trampa no puede repetirse en ningún botón de la aplicación. Tres tests la vigilan
+
+**Las tildes de las notas del Release**
+- Salían como rombos con signo de interrogación: *embebía* se leía *embeb?a*. En el runner de Windows la salida se escribía en cp1252 y GitHub la lee como UTF-8
+- El generador de notas fuerza UTF-8 en su salida, y hay tests que lo corren con la consola en cp1252 para comprobarlo
+- Las notas de un Release ya publicado se pueden regenerar sin recompilar el `.exe`
+
 ## 0.12.0 — Documentos que entran en un correo
 
 **El PDF pesaba demasiado para mandarlo**

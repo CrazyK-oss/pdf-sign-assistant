@@ -181,6 +181,27 @@ class BotonIcono(QPushButton):
         self._refrescar_icono()
 
 
+def _conectar_click(b: QPushButton, on_click) -> None:
+    """Conecta `clicked` descartando el argumento que manda Qt.
+
+    `QPushButton.clicked` emite un bool con el estado *checked*, y PyQt se
+    lo pasa al slot si éste acepta un argumento. Eso rompe el patrón más
+    natural para capturar una variable de bucle:
+
+        on_click=lambda ruta=str(p): self.abrir_documento.emit(ruta)
+
+    Qt pisa el valor por defecto con `False`, y la señal recibe un bool
+    donde esperaba un str. Reventó de verdad al abrir un documento
+    reciente desde la pantalla de inicio, con un mensaje que no se parece
+    en nada a la causa: "emit(): argument 1 has unexpected type 'bool'".
+
+    Ningún `on_click` de la aplicación quiere el estado del botón —los
+    que sí lo necesitan usan `toggled`— así que se llama sin argumentos y
+    los defaults quedan intactos.
+    """
+    b.clicked.connect(lambda *_descartado: on_click())
+
+
 def boton(
     texto: str = "",
     *,
@@ -220,7 +241,7 @@ def boton(
     if tooltip:
         b.setToolTip(tooltip)
     if on_click is not None:
-        b.clicked.connect(on_click)
+        _conectar_click(b, on_click)
     b.setEnabled(enabled)
     repolish(b)
     return b
@@ -253,7 +274,7 @@ def boton_icono(
         b.setToolTip(tooltip)
         b.setAccessibleName(tooltip)
     if on_click is not None:
-        b.clicked.connect(on_click)
+        _conectar_click(b, on_click)
     b.setEnabled(enabled)
     repolish(b)
     return b

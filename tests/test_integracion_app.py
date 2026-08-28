@@ -172,3 +172,85 @@ def test_el_boton_de_tema_anuncia_a_donde_lleva(app, ventana):
         assert ventana.barra_lateral.btn_tema.text().strip() == esperado
         ventana._toggle_tema()
         app.processEvents()
+
+
+# ── El bool que manda QPushButton.clicked ─────────────────────────────────────
+
+def test_on_click_no_recibe_el_estado_del_boton(app):
+    """`QPushButton.clicked` emite un bool con el estado *checked*, y PyQt
+    se lo pasa al slot si acepta un argumento.
+
+    Eso rompe el patrón normal para capturar una variable de bucle
+    (`lambda x=valor: ...`): Qt pisa el default con False. La aplicación
+    crasheaba al abrir un documento reciente desde el inicio, con
+    "emit(): argument 1 has unexpected type 'bool'".
+    """
+    from modules.ui import boton, boton_icono
+
+    visto = []
+    boton("x", on_click=lambda v="esperado": visto.append(v)).click()
+    boton_icono("carpeta", on_click=lambda v="con-icono": visto.append(v)).click()
+
+    assert visto == ["esperado", "con-icono"], (
+        f"Qt pisó los valores por defecto: {visto}")
+
+
+def test_on_click_sin_parametros_sigue_andando(app):
+    """El envoltorio no debe romper el caso corriente."""
+    from modules.ui import boton
+
+    veces = []
+    b = boton("x", on_click=lambda: veces.append(1))
+    b.click()
+    b.click()
+    assert veces == [1, 1]
+
+
+def test_abrir_un_documento_reciente_emite_su_ruta(app, ventana, tmp_path):
+    """El crash de verdad, de punta a punta: la tarjeta de un documento
+    reciente tiene que emitir SU ruta y no un booleano."""
+    from modules.navegacion import PantallaInicio
+
+    inicio = PantallaInicio()
+    try:
+        emitidas = []
+        inicio.abrir_documento.connect(emitidas.append)
+
+        rutas = [tmp_path / "Contrato.pdf", tmp_path / "Acta.pdf"]
+        for r in rutas:
+            r.write_bytes(b"%PDF-1.4\n")
+        inicio.set_recientes([(r, "01/01/2026") for r in rutas], len(rutas))
+
+        filas = [inicio.lay_recientes.itemAt(i).widget()
+                 for i in range(inicio.lay_recientes.count())]
+        assert len(filas) == 2
+
+        for fila in filas:
+            fila.click()
+            app.processEvents()
+
+        assert emitidas == [str(r) for r in rutas], (
+            f"se esperaban las rutas y llegó {emitidas}")
+    finally:
+        inicio.deleteLater()
+
+
+def test_abrir_carpeta_desde_el_inicio(app):
+    """Misma familia: una señal sin argumentos conectada a un botón."""
+    from modules.navegacion import PantallaInicio
+
+    inicio = PantallaInicio()
+    try:
+        veces = []
+        inicio.abrir_carpeta.connect(lambda: veces.append(1))
+        inicio.set_recientes([], 0)
+
+        from PyQt6.QtWidgets import QPushButton
+        botones = [b for b in inicio.findChildren(QPushButton)
+                   if "carpeta" in b.text().lower()]
+        assert botones, "no se encontró el botón de abrir carpeta"
+        botones[0].click()
+        app.processEvents()
+        assert veces == [1]
+    finally:
+        inicio.deleteLater()
