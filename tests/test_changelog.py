@@ -236,6 +236,28 @@ def _ejecutar_en_consola_no_utf8(*argumentos):
         capture_output=True, cwd=RAIZ, env=entorno)      # bytes, sin decodificar
 
 
+def _texto_utf8(salida: bytes) -> str:
+    """Decodifica la salida capturada como UTF-8 y normaliza los saltos.
+
+    Los tests de esta sección capturan **bytes** a propósito: decodificar
+    con `text=True` dejaría que Python arregle solo lo que queremos
+    comprobar. El precio es que hay que traducir los saltos a mano: en
+    Windows el modo texto convierte cada `\\n` en `\\r\\n` al escribir, así
+    que los bytes traen `\\r` que el CHANGELOG no tiene. Es cosmético para
+    el Release —GitHub los ignora— pero rompía la comparación exacta.
+    """
+    return salida.decode("utf-8").replace("\r\n", "\n")
+
+
+def test_texto_utf8_normaliza_los_saltos_de_windows():
+    """En Linux no hay traducción de saltos, así que el caso de Windows
+    sólo se puede probar acá. Sin esta normalización los tests de abajo
+    pasan en Linux y fallan en el runner de Windows, que es justo donde
+    corre el Release."""
+    assert _texto_utf8(b"uno\r\ndos\r\n") == "uno\ndos\n"
+    assert _texto_utf8("embebía\r\n".encode()) == "embebía\n"
+
+
 def test_la_salida_es_utf8_aunque_la_consola_no_lo_sea():
     """El bug que salió publicado en la 0.12.0.
 
@@ -247,14 +269,23 @@ def test_la_salida_es_utf8_aunque_la_consola_no_lo_sea():
     r = _ejecutar_en_consola_no_utf8(__version__)
     assert r.returncode == 0
 
-    texto = r.stdout.decode("utf-8")      # revienta si no es UTF-8 válido
+    texto = _texto_utf8(r.stdout)         # revienta si no es UTF-8 válido
     assert texto.strip() == seccion(__version__)
+
+    # Y que no haya pasado de casualidad: en cp1252 una 'í' ocupa un solo
+    # byte (0xED) y en UTF-8 ocupa dos (0xC3 0xAD). Buscar la secuencia
+    # UTF-8 en los bytes crudos deja el bug a la vista aunque alguien
+    # afloje la comparación de arriba.
+    acentuadas = [c for c in seccion(__version__) if ord(c) > 127]
+    assert acentuadas, "hace falta al menos un acento para probar algo"
+    for c in acentuadas:
+        assert c.encode("utf-8") in r.stdout, f"{c!r} no salió en UTF-8"
 
 
 def test_el_titulo_tambien_sale_en_utf8():
     r = _ejecutar_en_consola_no_utf8("--titulo", __version__)
     assert r.returncode == 0
-    assert r.stdout.decode("utf-8").strip() == titulo(__version__)
+    assert _texto_utf8(r.stdout).strip() == titulo(__version__)
 
 
 def test_el_changelog_tiene_acentos_que_verificar():
@@ -316,5 +347,5 @@ def test_el_comando_notas_sale_en_utf8():
     """El mismo bug de la 0.12.0, ahora sobre el cuerpo completo."""
     r = _ejecutar_en_consola_no_utf8("--notas", __version__, f"v{__version__}")
     assert r.returncode == 0
-    texto = r.stdout.decode("utf-8")        # revienta si no es UTF-8
+    texto = _texto_utf8(r.stdout)           # revienta si no es UTF-8
     assert "Configuración" in texto and "Más información" in texto
