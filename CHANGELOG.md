@@ -32,12 +32,11 @@ Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 - El remuestreo recalcula el DPI desde los píxeles que quedaron, para que el tamaño físico de la página no se mueva. No puede quedar exacto porque JFIF guarda la densidad como entero, pero el error queda por debajo de 1 punto (0,35 mm)
 - Comprimir es una mejora, no un requisito: si Pillow falta o la imagen no se puede leer, se guarda el original en vez de fallar el guardado entero
 
-## 0.11.1 — El actualizador dice qué cambió
-
+**El actualizador dice qué cambió**
 - **El aviso de actualización ahora muestra el changelog.** Antes mostraba el cuerpo del Release, que era una plantilla fija con instrucciones de descarga: dónde bajar el `.exe`, la advertencia de SmartScreen, dónde quedan los archivos. Le explicaba al usuario cómo descargar algo que la app ya estaba por descargar sola, y no le decía **qué cambió**
 - Nuevo `CHANGELOG.md` como única fuente de verdad. El workflow de Release extrae de ahí la sección de la versión que publica y la pone **antes** de las instrucciones, separada por un comentario HTML que GitHub no muestra; la app corta ahí y enseña sólo la primera mitad
 - Si una versión no tiene su sección, el build **falla antes de publicar** en vez de sacar notas vacías. Y un test lo detecta antes todavía, al subir el número de versión, sin gastar un runner de Windows compilando el `.exe`
-- El título del Release ahora lleva el nombre de la versión: *PDF Sign Assistant 0.11.1 — El actualizador dice qué cambió*
+- El título del Release ahora lleva el nombre de la versión: *PDF Sign Assistant 0.12.0 — Documentos que entran en un correo*
 - Las notas se muestran en un `QTextBrowser` con enlaces clicables, y el diálogo abre con el foco en **Actualizar ahora** en vez de en el panel de texto
 - El README ya no duplica el changelog: lo enlaza
 
