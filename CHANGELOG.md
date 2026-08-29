@@ -11,6 +11,30 @@ build falla antes de publicar.
 Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 (`vX.Y.Z`) y que `modules/version.py`. Un test lo verifica.
 
+## 0.13.0 — Unir, dividir y seguir escaneando
+
+**Herramienta nueva: Unir y dividir PDFs**
+- Pegar varios PDF en uno solo, o separar uno en varios archivos, sin subir nada a ninguna página web
+- Las páginas de los archivos se ven todas juntas en una lista: se reordenan, se giran y se quitan las que sobren antes de guardar
+- Para dividir hay tres formas, porque son tres necesidades distintas: una parte por página, cada N páginas, o por rangos escritos a mano (`1-10, 11-24, 25-40`). El diálogo dice cuántos archivos van a salir antes de crearlos, y si el rango no se entiende lo explica en vez de dejar el botón encendido
+- Las partes se numeran con ceros a la izquierda (`parte 01 de 12`): sin eso, el explorador de Windows ordena la parte 10 entre la 1 y la 2
+
+**"Escanear a PDF" ahora puede partir de un PDF que ya existe**
+- Es el caso de "ya tenía el documento armado y me faltó escanear una hoja". Antes había que rehacerlo entero; ahora se abre lo que hay y se le agregan las páginas que falten, en el lugar que corresponda
+- También se pueden arrastrar PDF a la ventana, no sólo imágenes
+
+**El texto de los PDF ya no se pierde**
+- Es la regla que gobierna a las dos herramientas: una página que ya es PDF se **copia**, nunca se convierte en imagen. Conserva su texto seleccionable y buscable, su peso original y su nitidez
+- Sólo se convierten las páginas que ya eran imágenes: lo que sale del escáner o lo que se importa a mano
+- La calidad de compresión, por lo mismo, ahora sólo afecta a esas páginas, y el aviso de "el archivo es grande" lo aclara
+- Guardar encima del mismo PDF que se abrió funciona: los archivos de origen se leen a memoria antes de escribir
+
+**Detalles**
+- La vista previa y las miniaturas ya dibujan páginas de PDF, no sólo imágenes. Una página de PDF sí se agranda al mirarla de cerca —es vectorial y no pierde nitidez—, a diferencia de un escaneo
+- Cada fila dice de dónde salió su página: *PDF · Contrato.pdf · pág. 3*, o *Escaneada · 2480×3508 px*
+- Un PDF con contraseña, dañado o que dejó de existir se avisa con un mensaje que dice qué hacer, y los demás archivos del lote se abren igual
+- Al dividir, si en la carpeta de destino ya hay archivos con esos nombres se pregunta antes de reemplazarlos: es la única operación que escribe varios archivos de una sola vez, sin pasar por el diálogo de guardar de Windows
+
 ## 0.12.1 — Arreglos de la 0.12.0
 
 **Abrir un documento reciente cerraba la aplicación**

@@ -210,3 +210,86 @@ def test_sobrescribir_un_pdf_existente(app, tmp_path):
     finally:
         pdf.close()
     assert list(tmp_path.glob("*.parcial")) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Partir de un PDF que ya existe
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def pdf_con_texto(ruta: Path, textos) -> Path:
+    doc = pymupdf.open()
+    for t in textos:
+        doc.new_page().insert_text((72, 120), t, fontsize=32)
+    doc.save(ruta)
+    doc.close()
+    return ruta
+
+
+def textos_de(ruta: Path) -> list[str]:
+    doc = pymupdf.open(ruta)
+    try:
+        return [p.get_text().strip() for p in doc]
+    finally:
+        doc.close()
+
+
+@pytest.fixture
+def vista(app, tmp_path):
+    from modules.herramienta_escaneo import VistaEscanearAPdf
+
+    v = VistaEscanearAPdf(tmp_path / "salida")
+    v.resize(1100, 720)
+    yield v
+    v.close()
+
+
+def test_abrir_un_pdf_trae_sus_paginas(vista, tmp_path):
+    """El caso que motivó todo: ya tenía el documento y me faltó una hoja."""
+    from modules.documento import ORIGEN_PDF
+
+    fuente = pdf_con_texto(tmp_path / "Contrato.pdf", ["UNO", "DOS"])
+    vista._agregar([str(fuente)])
+
+    assert vista.doc.total == 2
+    assert all(p.origen == ORIGEN_PDF for p in vista.doc.paginas)
+    assert vista.doc.nombre_sugerido() == "Contrato (editado).pdf"
+
+
+def test_agregarle_una_hoja_escaneada_a_un_pdf(app, vista, tmp_path):
+    """Lo importante: la hoja nueva se convierte, y las que ya eran PDF
+    conservan su texto en vez de volver convertidas en fotos."""
+    fuente = pdf_con_texto(tmp_path / "Contrato.pdf", ["UNO", "DOS"])
+    vista._agregar([str(fuente)])
+
+    hoja = imagen(tmp_path / "hoja.png", ROJO)
+    vista._on_escaneo_listo(str(hoja))
+    app.processEvents()
+    assert vista.doc.total == 3
+    assert vista.doc.mixto
+
+    destino = tmp_path / "final.pdf"
+    errores = ejecutar(app, list(vista.doc.paginas), destino)
+    assert not errores, errores
+
+    doc = pymupdf.open(destino)
+    try:
+        assert doc.page_count == 3
+        assert [doc[i].get_text().strip() for i in (0, 1)] == ["UNO", "DOS"]
+    finally:
+        doc.close()
+    assert parecido(color_dominante(pymupdf.open(destino)[2]), ROJO)
+
+
+def test_el_pdf_que_se_abrio_no_es_temporal(vista, tmp_path):
+    """Marcarlo temporal haría que la app borre el documento del usuario al
+    cerrar la herramienta. Es el peor error posible de esta pantalla."""
+    fuente = pdf_con_texto(tmp_path / "Contrato.pdf", ["UNO"])
+    vista._agregar([str(fuente)])
+    vista.limpiar_temporales()
+    assert fuente.is_file()
+
+
+def test_arrastrar_un_pdf_esta_permitido():
+    from modules.documento import filtrar_soportados
+
+    assert filtrar_soportados(["a.pdf", "b.png", "c.txt"]) == ["a.pdf", "b.png"]

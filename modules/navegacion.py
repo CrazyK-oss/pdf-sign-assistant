@@ -95,9 +95,21 @@ CATALOGO: tuple[Herramienta, ...] = (
             "Reordenalas, giralas y guardá el documento terminado."
         ),
         icono="escaner",
+        atajo="Ctrl+2",
+    ),
+    Herramienta(
+        id="unir",
+        titulo="Unir y dividir PDFs",
+        titulo_corto="Unir y dividir",
+        descripcion=(
+            "Pegá varios PDF en uno solo, o separá uno en varios archivos. "
+            "El texto se conserva: las páginas se copian, no se convierten "
+            "en imagen."
+        ),
+        icono="unir",
         chip="Nuevo",
         tono_chip="ok",
-        atajo="Ctrl+2",
+        atajo="Ctrl+3",
     ),
 )
 
