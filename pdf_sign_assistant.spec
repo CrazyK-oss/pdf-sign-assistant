@@ -148,6 +148,7 @@ hiddenimports = [
     "modules.fase_guardar",
     "modules.herramienta_escaneo",
     "modules.herramienta_unir",
+    "modules.hojas",
     "modules.iconos",
     "modules.imagen_pdf",
     "modules.lista_paginas",
