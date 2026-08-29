@@ -32,7 +32,8 @@ Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 **Detalles**
 - La vista previa y las miniaturas ya dibujan páginas de PDF, no sólo imágenes. Una página de PDF sí se agranda al mirarla de cerca —es vectorial y no pierde nitidez—, a diferencia de un escaneo
 - Cada fila dice de dónde salió su página: *PDF · Contrato.pdf · pág. 3*, o *Escaneada · 2480×3508 px*
-- Un PDF con contraseña, dañado o que dejó de existir se avisa con un mensaje que dice qué hacer, y los demás archivos del lote se abren igual
+- Los PDF "protegidos" que sólo restringen imprimir o copiar —la mayoría de los que uno se cruza— ahora se abren normalmente: se agregó la librería que hacía falta para descifrarlos
+- Un PDF con contraseña de verdad, dañado o que dejó de existir se avisa con un mensaje que dice qué hacer, y los demás archivos del lote se abren igual. Antes, un PDF cifrado se reportaba como *"puede estar dañado"*, que manda a buscar un problema que no existe
 - Al dividir, si en la carpeta de destino ya hay archivos con esos nombres se pregunta antes de reemplazarlos: es la única operación que escribe varios archivos de una sola vez, sin pasar por el diálogo de guardar de Windows
 
 ## 0.12.1 — Arreglos de la 0.12.0

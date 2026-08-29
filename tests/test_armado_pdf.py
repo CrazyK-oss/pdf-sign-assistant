@@ -521,3 +521,75 @@ def test_guardar_encima_de_uno_de_varios_origenes(fuente, tmp_path):
     salida = armar_pdf(paginas_pdf(fuente, [1]) + paginas_pdf(otro, [0]), otro)
     assert textos_de(salida) == ["DOS", "X"]
     assert textos_de(fuente) == ["UNO", "DOS", "TRES"], "el otro origen intacto"
+
+
+def test_un_pdf_cifrado_pero_sin_contrasena_de_apertura_se_abre(tmp_path):
+    """El caso más común de "PDF protegido": sólo restringe imprimir o
+    copiar, y se abre con la contraseña vacía. El usuario tiene todo el
+    derecho de leerlo, así que la herramienta también.
+
+    Requiere `cryptography`, que por eso está en requirements.txt: sin
+    ella pypdf ni siquiera puede intentar descifrarlo.
+    """
+    protegido = tmp_path / "solo_lectura.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 120), "PUBLICO", fontsize=36)
+    doc.save(protegido, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             owner_pw="duenio", user_pw="",          # sin clave de apertura
+             permissions=pymupdf.PDF_PERM_ACCESSIBILITY)
+    doc.close()
+
+    assert contar_paginas(protegido) == 1
+    salida = armar_pdf(paginas_pdf(protegido, [0]), tmp_path / "copia.pdf")
+    assert textos_de(salida) == ["PUBLICO"]
+
+
+def test_sin_cryptography_un_pdf_cifrado_dice_que_esta_protegido(tmp_path):
+    """El fallo que frenó el build de la 0.13.0, y que era un bug de
+    verdad y no de los tests.
+
+    En el runner de Windows no estaba `cryptography`, así que pypdf tiraba
+    "cryptography>=3.1 is required for AES algorithm". Eso caía en la rama
+    genérica y el usuario leía *"Puede estar dañado o no ser un PDF"*
+    sobre un archivo perfectamente sano — un mensaje que lo manda a buscar
+    un problema que no existe.
+
+    Se corre en un subproceso con la librería bloqueada porque acá sí está
+    instalada; es la única forma de cubrir el caso desde esta máquina.
+    """
+    programa = (
+        "import sys\n"
+        "class Bloqueo:\n"
+        "    def find_spec(self, nombre, ruta=None, destino=None):\n"
+        "        if nombre.split('.')[0] == 'cryptography':\n"
+        "            raise ImportError('sin cryptography')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Bloqueo())\n"
+        "for m in [m for m in sys.modules if m.split('.')[0] == 'cryptography']:\n"
+        "    del sys.modules[m]\n"
+        "import pathlib\n"
+        "from modules.armado_pdf import contar_paginas, ErrorArmado\n"
+        "try:\n"
+        "    contar_paginas(pathlib.Path(sys.argv[1]))\n"
+        "    print('SIN ERROR')\n"
+        "except ErrorArmado as e:\n"
+        "    print(str(e).splitlines()[0])\n"
+    )
+
+    protegido = tmp_path / "protegido.pdf"
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 120), "SECRETO", fontsize=36)
+    doc.save(protegido, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+             user_pw="clave", owner_pw="clave")
+    doc.close()
+
+    import subprocess
+    import sys
+    raiz = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-c", programa, str(protegido)],
+                       capture_output=True, text=True, cwd=raiz)
+    assert r.returncode == 0, r.stderr
+    assert "protegido con contraseña" in r.stdout, r.stdout
+    assert "dañado" not in r.stdout, (
+        f"le echa la culpa al archivo en vez de a la falta de la librería: "
+        f"{r.stdout.strip()}")

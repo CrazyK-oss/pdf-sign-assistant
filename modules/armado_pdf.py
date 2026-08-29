@@ -87,6 +87,67 @@ def _pypdf():
     return PdfReader, PdfWriter
 
 
+def _error_dependencia():
+    """La excepción que tira pypdf cuando le falta `cryptography`.
+
+    Se busca por nombre y no se importa arriba porque PyPDF2 —el plan B de
+    `_pypdf()`— no la tiene. Si no está, se devuelve algo que nunca coincide.
+    """
+    try:
+        from pypdf.errors import DependencyError
+        return DependencyError
+    except ImportError:                                  # pragma: no cover
+        class _Nunca(Exception):
+            pass
+        return _Nunca
+
+
+def _protegido(nombre: str) -> ErrorArmado:
+    return ErrorArmado(
+        f"«{nombre}» está protegido con contraseña.\n"
+        "Abrilo en tu lector, guardá una copia sin protección y probá "
+        "con esa.")
+
+
+def _abrir_lector(ruta: Path, datos=None):
+    """Abre un PDF y lo deja listo para leer, o explica por qué no se pudo.
+
+    Concentra acá lo que antes estaba repetido en `contar_paginas` y en el
+    bucle de armado, porque la parte delicada es la misma: distinguir "no
+    es un PDF" de "es un PDF pero está cerrado con llave". Decir lo
+    primero cuando pasa lo segundo manda al usuario a buscar un archivo
+    dañado que no existe.
+
+    Un PDF cifrado con AES necesita `cryptography` (va en requirements.txt).
+    Sin ella pypdf tira DependencyError, que es un caso de "protegido",
+    NO de "dañado": eso es lo que rompía el mensaje en el runner de
+    Windows, donde la librería no estaba instalada.
+    """
+    PdfReader, _ = _pypdf()
+    fuente = io.BytesIO(datos) if datos is not None else str(ruta)
+    try:
+        lector = PdfReader(fuente)
+    except _error_dependencia():
+        raise _protegido(ruta.name) from None
+    except Exception as e:                               # noqa: BLE001
+        raise ErrorArmado(
+            f"No se pudo leer «{ruta.name}»:\n{e}\n\n"
+            "Puede estar dañado o no ser un PDF.") from e
+
+    if getattr(lector, "is_encrypted", False):
+        # Un PDF "protegido" sin contraseña de apertura —el caso típico:
+        # sólo restringe imprimir o copiar— se abre con la clave vacía.
+        # Sólo si eso falla hace falta pedirla de verdad.
+        try:
+            abierto = lector.decrypt("")
+        except Exception:                                # noqa: BLE001
+            raise _protegido(ruta.name) from None
+        if not abierto:
+            raise _protegido(ruta.name)
+
+    return lector
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Lectura de PDF existentes
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -98,29 +159,12 @@ def contar_paginas(ruta: str | Path) -> int:
     abrir: es lo primero que pasa al arrastrar algo que no es un PDF, o uno
     con contraseña, y el usuario merece saber cuál de las dos cosas fue.
     """
-    PdfReader, _ = _pypdf()
     ruta = Path(ruta)
     if not ruta.is_file():
         raise ErrorArmado(f"No se encuentra el archivo:\n{ruta}")
+    lector = _abrir_lector(ruta)
     try:
-        lector = PdfReader(str(ruta))
-        if getattr(lector, "is_encrypted", False):
-            # Un PDF "protegido" sin contraseña de apertura se abre solo
-            # con la clave vacía; sólo si eso falla hace falta pedirla.
-            try:
-                if not lector.decrypt(""):
-                    raise ErrorArmado(
-                        f"«{ruta.name}» está protegido con contraseña.\n"
-                        "Abrilo en tu lector, guardá una copia sin "
-                        "protección y probá con esa.")
-            except ErrorArmado:
-                raise
-            except Exception:                            # noqa: BLE001
-                raise ErrorArmado(
-                    f"«{ruta.name}» está protegido con contraseña.") from None
         return len(lector.pages)
-    except ErrorArmado:
-        raise
     except Exception as e:                               # noqa: BLE001
         raise ErrorArmado(
             f"No se pudo leer «{ruta.name}»:\n{e}\n\n"
@@ -205,14 +249,7 @@ def armar_pdf(paginas: Sequence, destino: str | Path, *,
                     # Windows no se puede renombrar sobre un archivo que
                     # está abierto. Leerlo entero cuesta RAM proporcional
                     # al PDF y evita el problema de raíz.
-                    lectores[clave] = PdfReader(io.BytesIO(ruta.read_bytes()))
-                    if getattr(lectores[clave], "is_encrypted", False):
-                        try:
-                            lectores[clave].decrypt("")   # type: ignore[attr-defined]
-                        except Exception:                 # noqa: BLE001
-                            raise ErrorArmado(
-                                f"«{ruta.name}» está protegido con "
-                                "contraseña.") from None
+                    lectores[clave] = _abrir_lector(ruta, ruta.read_bytes())
                 lector = lectores[clave]
                 paginas_origen = lector.pages            # type: ignore[attr-defined]
                 if not 0 <= pagina.indice < len(paginas_origen):
