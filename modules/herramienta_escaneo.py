@@ -56,7 +56,11 @@ from PyQt6.QtWidgets import (
 )
 
 from modules.armado_pdf import ErrorArmado, abrir_en, armar_pdf, instantanea
-from modules.dispositivos import ErrorDispositivo, verificar_escaneo_disponible
+from modules.dispositivos import (
+    ErrorDispositivo,
+    capacidades_escaner,
+    verificar_escaneo_disponible,
+)
 from modules.documento import (
     ORIGEN_ESCANER,
     ORIGEN_IMAGEN,
@@ -66,7 +70,8 @@ from modules.documento import (
     es_pdf,
     filtrar_soportados,
 )
-from modules.escaner_qt import DPI_DOCUMENTO, lanzar_escaneo
+from modules.escaner_qt import DPI_DOCUMENTO, lanzar_escaneo, lanzar_lote
+from modules.hojas import paginas_en_blanco
 from modules.imagen_pdf import (
     CALIDAD_DEFECTO,
     LIMITE_CORREO_MB,
@@ -98,6 +103,29 @@ log = logging.getLogger(__name__)
 
 FILTRO_IMG = "Imágenes (*.png *.jpg *.jpeg *.bmp *.tiff *.tif)"
 FILTRO_PDF = "Documentos PDF (*.pdf)"
+
+#: Cómo entra el papel al escáner.
+ORIGEN_CRISTAL = "cristal"
+ORIGEN_LOTE = "lote"
+ORIGEN_LOTE_DUPLEX = "lote_duplex"
+
+NOMBRE_ORIGEN = {
+    ORIGEN_CRISTAL: "Hoja por hoja (cristal)",
+    ORIGEN_LOTE: "Todo el alimentador",
+    ORIGEN_LOTE_DUPLEX: "Alimentador, doble faz",
+}
+
+TOOLTIP_ORIGEN = {
+    ORIGEN_CRISTAL:
+        "Una hoja por vez desde el cristal. Se abre el diálogo de Windows "
+        "en cada página.",
+    ORIGEN_LOTE:
+        "Pasa todo el taco de corrido y agrega una página por hoja. "
+        "Termina solo cuando se acaba el papel.",
+    ORIGEN_LOTE_DUPLEX:
+        "Pasa todo el taco leyendo las dos caras: dos páginas por hoja. "
+        "Al terminar se ofrece quitar los dorsos que salgan en blanco.",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -225,8 +253,19 @@ class VistaEscanearAPdf(QWidget):
         self._limite_mb = limite_mb
         self.doc = Documento()
         self._worker: _WorkerArmarPDF | None = None
+        self._lote = None
         self._escaneando = False
         self._temporales: list[str] = []
+        #: Páginas que trajo el lote en curso, para ofrecer al final quitar
+        #: los dorsos en blanco sólo de ESAS y no de todo el documento.
+        self._ids_del_lote: list[int] = []
+
+        # Se consulta una vez al abrir la herramienta: preguntarle al
+        # escáner en cada refresco de pantalla lo despierta y tarda.
+        self.capacidades = capacidades_escaner()
+        self._origen = (ORIGEN_LOTE_DUPLEX if self.capacidades.duplex
+                        else ORIGEN_LOTE if self.capacidades.alimentador
+                        else ORIGEN_CRISTAL)
 
         self._construir_ui()
         self._refrescar()
@@ -283,12 +322,18 @@ class VistaEscanearAPdf(QWidget):
         lay.setContentsMargins(SPACE["xl"], SPACE["sm"], SPACE["xl"], SPACE["sm"])
         lay.setSpacing(SPACE["sm"])
 
-        self.btn_escanear = boton("Escanear página", icono="escaner",
-                                  min_w=180,
-                                  tooltip="Digitalizar una hoja y agregarla al final "
-                                          "(Ctrl+N)",
+        self.btn_escanear = boton("Escanear", icono="escaner", min_w=150,
+                                  tooltip="Digitalizar y agregar al final (Ctrl+N)",
                                   on_click=self._escanear)
         lay.addWidget(self.btn_escanear)
+
+        # Cómo entra el papel. Las opciones se arman según lo que el
+        # escáner dice saber hacer: ofrecer "alimentador" en una máquina
+        # que sólo tiene cristal es un botón que devuelve error.
+        self.combo_origen = selector(
+            self._opciones_origen(), actual=self._origen,
+            tooltips=dict(TOOLTIP_ORIGEN), on_change=self._on_origen, min_w=210)
+        lay.addWidget(self.combo_origen)
 
         lay.addWidget(boton("Importar…", icono="imagen", variant="secondary",
                             tooltip="Agregar imágenes que ya tenés en el disco",
@@ -389,12 +434,47 @@ class VistaEscanearAPdf(QWidget):
             self.chip_escaner.setToolTip(
                 "No se detectó un escáner. Igual podés importar imágenes "
                 "o abrir un PDF desde el disco.")
-        else:
-            self.chip_escaner.set_estado(f"Escáner listo · {DPI_DOCUMENTO} DPI",
-                                         "ok", "check-circulo")
-            self.chip_escaner.setToolTip(
-                f"Las páginas se digitalizan a {DPI_DOCUMENTO} DPI, que es "
-                "calidad de documento.")
+            return
+
+        cap = self.capacidades
+        self.chip_escaner.set_estado(
+            f"{cap.descripcion()} · {DPI_DOCUMENTO} DPI", "ok", "check-circulo")
+
+        detalle = [f"Las páginas se digitalizan a {DPI_DOCUMENTO} DPI, que es "
+                   "calidad de documento."]
+        if cap.alimentador:
+            detalle.append("Tiene alimentador: podés cargar el taco entero y "
+                           "escanearlo de corrido.")
+        if cap.duplex:
+            detalle.append("Lee las dos caras en una sola pasada.")
+        if not cap.conocidas:
+            # No es lo mismo "sé que sólo tiene cristal" que "no me lo quiso
+            # decir". Con la segunda, el usuario merece saber por qué no ve
+            # las opciones de alimentador.
+            detalle.append("El driver no informa si tiene alimentador, así "
+                           "que se ofrece sólo el cristal.")
+        self.chip_escaner.setToolTip("\n\n".join(detalle))
+
+    def _opciones_origen(self) -> list[tuple[str, str]]:
+        """Las formas de escanear que este aparato admite de verdad."""
+        cap = self.capacidades
+        opciones = []
+        if cap.cristal or not cap.alimentador:
+            opciones.append((ORIGEN_CRISTAL, NOMBRE_ORIGEN[ORIGEN_CRISTAL]))
+        if cap.alimentador:
+            opciones.append((ORIGEN_LOTE, NOMBRE_ORIGEN[ORIGEN_LOTE]))
+        if cap.duplex:
+            opciones.append((ORIGEN_LOTE_DUPLEX,
+                             NOMBRE_ORIGEN[ORIGEN_LOTE_DUPLEX]))
+        return opciones
+
+    def _on_origen(self, clave) -> None:
+        self._origen = clave or ORIGEN_CRISTAL
+        self.combo_origen.setToolTip(TOOLTIP_ORIGEN.get(self._origen, ""))
+        if hasattr(self, "btn_escanear"):
+            self.btn_escanear.setText(
+                "Escanear" if self._origen == ORIGEN_CRISTAL
+                else "Escanear el taco")
 
     # ── Acciones sobre el modelo ──────────────────────────────────────────────
 
@@ -443,12 +523,113 @@ class VistaEscanearAPdf(QWidget):
 
         self._escaneando = True
         self._refrescar()
-        lanzar_escaneo(
+
+        if self._origen == ORIGEN_CRISTAL:
+            lanzar_escaneo(
+                dpi=DPI_DOCUMENTO,
+                al_completar=self._on_escaneo_listo,
+                al_cancelar=self._on_escaneo_cancelado,
+                al_fallar=self._on_escaneo_error,
+            )
+            return
+
+        self._ids_del_lote = []
+        self.barra_progreso.setRange(0, 0)      # indeterminada: no se sabe
+        self.barra_progreso.show()              # cuántas hojas hay en la bandeja
+        self._lote = lanzar_lote(
             dpi=DPI_DOCUMENTO,
-            al_completar=self._on_escaneo_listo,
-            al_cancelar=self._on_escaneo_cancelado,
+            duplex=(self._origen == ORIGEN_LOTE_DUPLEX),
+            al_llegar_pagina=self._on_pagina_del_lote,
+            al_completar=self._on_lote_completado,
+            al_parcial=self._on_lote_parcial,
+            al_cancelar=self._on_lote_cancelado,
             al_fallar=self._on_escaneo_error,
         )
+
+    # ── Lote del alimentador ──────────────────────────────────────────────────
+
+    def _on_pagina_del_lote(self, ruta: str, numero: int) -> None:
+        """Cada hoja se agrega apenas llega, sin esperar al final del taco.
+
+        Con 30 hojas el lote son varios minutos: mostrarlas recién al
+        terminar dejaría la pantalla muda todo ese rato.
+        """
+        self._temporales.append(ruta)
+        pagina = self.doc.agregar(ruta, origen=ORIGEN_ESCANER, temporal=True)
+        self._ids_del_lote.append(pagina.id)
+        self.panel.marcar(pagina.id)
+        self._refrescar()
+        self.panel.ir_a_la_ultima()
+        self.pie.set_estado(f"Escaneando… {numero} página(s) hasta ahora.",
+                            tono="info")
+
+    def _terminar_lote(self) -> None:
+        self._escaneando = False
+        self._lote = None
+        self.barra_progreso.setRange(0, 100)
+        self.barra_progreso.hide()
+
+    def _on_lote_completado(self, cuantas: int) -> None:
+        self._terminar_lote()
+        self._refrescar()
+        self._ofrecer_quitar_dorsos()
+        self.btn_escanear.setFocus()
+
+    def _on_lote_cancelado(self) -> None:
+        self._terminar_lote()
+        self._refrescar()
+
+    def _on_lote_parcial(self, error, rutas) -> None:
+        """Se cortó a mitad del taco. Las páginas ya están en la lista."""
+        self._terminar_lote()
+        self._refrescar()
+        traidas = len(self._ids_del_lote)
+        texto = error.texto_completo() if isinstance(error, ErrorDispositivo) \
+            else str(error)
+        QMessageBox.warning(
+            self, "El lote se interrumpió",
+            f"{texto}\n\nLas {traidas} página(s) que ya se habían escaneado "
+            "quedan en la lista. Podés cargar el resto del taco y seguir "
+            "escaneando desde donde quedó.")
+        self._actualizar_chip_escaner()
+
+    def _ofrecer_quitar_dorsos(self) -> None:
+        """Al escanear a doble faz, las hojas impresas de un solo lado dejan
+        un dorso vacío. Se ofrece sacarlos, nunca se hace solo.
+
+        Que sea una pregunta y no un automatismo es deliberado: la
+        detección mira cuánta tinta hay en la hoja y no puede distinguir
+        una página realmente vacía de una que sólo tiene un número de
+        folio. Equivocarse en silencio sería borrar trabajo del usuario.
+        """
+        if self._origen != ORIGEN_LOTE_DUPLEX or not self._ids_del_lote:
+            return
+
+        del_lote = [p for p in self.doc.paginas if p.id in set(self._ids_del_lote)]
+        vacias = paginas_en_blanco(del_lote)
+        if not vacias:
+            return
+
+        numeros = ", ".join(str(self.doc.indice_de(p.id) + 1) for p in vacias[:12])
+        if len(vacias) > 12:
+            numeros += f" y {len(vacias) - 12} más"
+
+        respuesta = QMessageBox.question(
+            self, "Dorsos en blanco",
+            f"De las {len(del_lote)} páginas del taco, {len(vacias)} parecen "
+            f"estar en blanco:\n\npáginas {numeros}\n\n"
+            "Son los dorsos de las hojas impresas de un solo lado. "
+            "¿Las quito del documento?\n\n"
+            "Podés revisarlas en la lista antes de decidir: las que tengan "
+            "aunque sea un sello o un número de página no aparecen acá.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if respuesta == QMessageBox.StandardButton.Yes:
+            self.doc.quitar_varias([p.id for p in vacias])
+            self.panel.marcar(None)
+            self._refrescar()
+            self.pie.set_estado(
+                f"Se quitaron {len(vacias)} páginas en blanco.", tono="ok")
 
     def _on_escaneo_listo(self, ruta: str) -> None:
         self._escaneando = False

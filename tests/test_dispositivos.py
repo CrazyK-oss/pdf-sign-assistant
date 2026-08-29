@@ -29,7 +29,9 @@ from modules.dispositivos import (
     DPI_FALLBACK,
     DPI_RENDER_MAX,
     ErrorDispositivo,
+    es_atasco,
     es_cancelacion_usuario,
+    es_fin_de_papel,
     interpretar_error_wia,
     sanear_capacidades,
 )
@@ -164,7 +166,6 @@ def test_error_wia_desconocido_tiene_salida_util():
 
 @pytest.mark.parametrize("texto", [
     "Operation cancelled by user",
-    "com_error 0x80210003",
     "USER CANCELED the dialog",
 ])
 def test_cancelacion_del_usuario_no_es_error(texto):
@@ -174,10 +175,56 @@ def test_cancelacion_del_usuario_no_es_error(texto):
 @pytest.mark.parametrize("texto", [
     "0x80210006 busy",
     "paper jam",
+    "com_error 0x80210003",       # sin papel: NO es una cancelación
     "",
 ])
 def test_errores_reales_no_se_confunden_con_cancelacion(texto):
     assert not es_cancelacion_usuario(Exception(texto))
+
+
+# ── Fin de papel: la señal que ordena el lote del alimentador ────────────────
+
+def test_sin_papel_no_es_una_cancelacion():
+    """El código 0x80210003 es WIA_ERROR_PAPER_EMPTY, y estuvo clasificado
+    como "el usuario canceló" desde el principio.
+
+    Con el cristal daba igual: ese código casi no aparece. Con alimentador
+    es la señal NORMAL de que se terminó el taco, así que un lote de 20
+    hojas habría terminado en silencio como si alguien hubiera cerrado el
+    diálogo, y escanear con la bandeja vacía no habría dicho nada.
+    """
+    sin_papel = Exception("com_error 0x80210003 WIA_ERROR_PAPER_EMPTY")
+    assert es_fin_de_papel(sin_papel)
+    assert not es_cancelacion_usuario(sin_papel)
+
+
+def test_una_cancelacion_no_es_fin_de_papel():
+    cancelado = Exception("Operation cancelled by user")
+    assert es_cancelacion_usuario(cancelado)
+    assert not es_fin_de_papel(cancelado)
+
+
+def test_un_atasco_no_es_ninguna_de_las_dos():
+    """Quedarse sin papel es el final feliz; un atasco deja una hoja
+    trabada adentro y alguien tiene que ir a sacarla."""
+    atasco = Exception("com_error 0x80210002")
+    assert es_atasco(atasco)
+    assert not es_fin_de_papel(atasco)
+    assert not es_cancelacion_usuario(atasco)
+
+
+@pytest.mark.parametrize("codigo, esperado", [
+    ("0x80210002", "atasc"),
+    ("0x80210003", "no hay papel"),
+    ("0x80210004", "no pudo tomar"),
+    ("0x80210016", "tapa"),
+])
+def test_los_errores_del_alimentador_tienen_mensaje_propio(codigo, esperado):
+    """Con ADF estos son moneda corriente: "el escáner reportó un error"
+    no le sirve a nadie parado frente a una bandeja trabada."""
+    err = interpretar_error_wia(Exception(f"com_error {codigo}"))
+    assert esperado in err.mensaje.lower()
+    assert err.sugerencia
 
 
 # ── Comportamiento según la plataforma ────────────────────────────────────────

@@ -271,8 +271,45 @@ def color(token: str, alterno: str = "") -> str:
 #  Generador de stylesheet
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_stylesheet(p: dict) -> str:
+def _archivo_flecha(p: dict, modo: str) -> str:
+    """Escribe el chevron del desplegable y devuelve su ruta para el QSS.
+
+    Hace falta un ARCHIVO porque `image: url(...)` no acepta otra cosa, y
+    los iconos de esta app se dibujan en memoria desde SVG. Se guarda uno
+    por tema, con el color del texto atenuado, y se reescribe en cada
+    cambio de tema: son 300 bytes.
+
+    Si algo falla se devuelve "", y la regla del QSS se omite: quedaría el
+    desplegable sin flecha, que es feo pero no rompe nada.
+    """
+    try:
+        import tempfile
+        from pathlib import Path
+
+        from modules.iconos import pixmap
+
+        destino = Path(tempfile.gettempdir()) / f"pdfsign_chevron_{modo}.png"
+        pm = pixmap("chevron-abajo", 10, color=p["text_muted"])
+        if pm.isNull() or not pm.save(str(destino), "PNG"):
+            return ""
+        # QSS quiere barras normales incluso en Windows.
+        return str(destino).replace("\\", "/")
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _build_stylesheet(p: dict, flecha: str = "") -> str:
     r, f, s = RADIUS, FS, SIZE
+    # La flecha necesita SÍ o SÍ una imagen: en cuanto una hoja de estilo
+    # toca ::drop-down, Qt deja de dibujar el control nativo. Con una regla
+    # de tamaño y sin imagen —como estaba— el desplegable quedaba sin
+    # ninguna marca, indistinguible de un campo de texto. Sin archivo, se
+    # omite la regla y al menos vuelve el dibujo por defecto de Qt.
+    # Llaves simples: esto se inserta como VALOR en la plantilla de abajo,
+    # no se vuelve a interpretar como f-string.
+    regla_flecha = (
+        f"QComboBox::down-arrow {{ image: url({flecha}); "
+        f"width: 10px; height: 10px; }}" if flecha else "")
     return f"""
 /* ═══ Base ═══════════════════════════════════════════════════════════════════
    El fondo se aplica SOLO a ventanas y contenedores con nombre. Aplicarlo a
@@ -379,7 +416,11 @@ QComboBox::drop-down {{
     padding-right: 10px;
     width: 20px;
 }}
-QComboBox::down-arrow {{ width: 10px; height: 10px; }}
+/* La flecha necesita SÍ o SÍ una imagen: en cuanto una hoja de estilo
+   toca ::drop-down, Qt deja de dibujar el control nativo. Con la regla
+   de tamaño y sin imagen —como estaba— el desplegable quedaba sin
+   ninguna marca, indistinguible de un campo de texto. */
+{regla_flecha}
 QComboBox QAbstractItemView {{
     background-color: {p['elevated']};
     border: 1px solid {p['border']};
@@ -946,7 +987,8 @@ def apply_theme(app: QApplication, mode: str = "light") -> None:
         pass
 
     app.setPalette(_build_palette(palette))
-    app.setStyleSheet(_build_stylesheet(palette))
+    app.setStyleSheet(_build_stylesheet(
+        palette, _archivo_flecha(palette, mode)))
     app.setFont(QFont("Segoe UI", font_pt(10)))
 
     theme_signals.changed.emit(mode)

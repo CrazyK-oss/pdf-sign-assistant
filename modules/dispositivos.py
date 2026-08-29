@@ -57,6 +57,46 @@ DPI_REINTENTOS = (200, 150)
 # Tipo de dispositivo WIA
 WIA_TIPO_ESCANER = 1
 
+# ── WIA: propiedades del manejo de documentos ────────────────────────────────
+# Son las que gobiernan el alimentador automático (ADF) y el dúplex. Los
+# números son de la especificación de WIA, no inventados: los drivers los
+# publican con estos IDs y no con nombres.
+WIA_DPS_DOCUMENT_HANDLING_CAPABILITIES = 3086   # qué sabe hacer el aparato
+WIA_DPS_DOCUMENT_HANDLING_STATUS       = 3087   # cómo está AHORA
+WIA_DPS_DOCUMENT_HANDLING_SELECT       = 3088   # qué le pedimos que use
+WIA_DPS_PAGES                          = 3096   # cuántas hojas; 0 = todas
+
+# Bits de CAPABILITIES: qué puede hacer el escáner.
+WIA_CAP_FEEDER   = 0x001        # tiene alimentador
+WIA_CAP_FLATBED  = 0x002        # tiene cristal
+WIA_CAP_DUPLEX   = 0x004        # escanea las dos caras de una pasada
+WIA_CAP_DETECT_FEED = 0x020     # sabe si hay papel cargado
+WIA_CAP_DETECT_DUP  = 0x040
+
+# Bits de STATUS: cómo está el escáner en este momento.
+WIA_EST_FEED_READY = 0x001      # hay papel en el alimentador
+WIA_EST_FLAT_READY = 0x002
+WIA_EST_DUP_READY  = 0x004
+
+# Bits de SELECT: lo que se le pide para el trabajo.
+WIA_SEL_FEEDER  = 0x001
+WIA_SEL_FLATBED = 0x002
+WIA_SEL_DUPLEX  = 0x004
+
+#: Pedirle 0 páginas a WIA significa "todas las que haya en el alimentador".
+WIA_TODAS_LAS_PAGINAS = 0
+
+#: Tope de seguridad del lote. Si un driver nunca avisa que se quedó sin
+#: papel —los hay—, sin esto el bucle escanea para siempre y llena el disco.
+LOTE_MAX_PAGINAS = 500
+
+# ── WIA: códigos de error que importan con alimentador ───────────────────────
+# Con cristal casi no aparecen; con ADF son parte del funcionamiento normal.
+WIA_ERROR_PAPER_JAM   = "0x80210002"
+WIA_ERROR_PAPER_EMPTY = "0x80210003"    # NO es una cancelación: es fin de papel
+WIA_ERROR_PAPER_PROBLEM = "0x80210004"
+WIA_ERROR_COVER_OPEN  = "0x80210016"
+
 
 class ErrorDispositivo(Exception):
     """Error de impresora o escáner con texto apto para mostrar.
@@ -375,6 +415,124 @@ def listar_escaneres() -> list[DispositivoEscaner]:
     return dispositivos
 
 
+@dataclass(frozen=True)
+class CapacidadesEscaner:
+    """Qué sabe hacer el escáner y cómo está en este momento.
+
+    Se lee de las propiedades WIA del dispositivo. Un driver puede no
+    publicarlas —los de escáneres viejos rara vez lo hacen—, y en ese caso
+    se asume lo conservador: sólo cristal, una hoja por vez. Suponer que
+    hay alimentador cuando no lo hay deja al usuario apretando un botón
+    que devuelve error.
+    """
+
+    alimentador: bool = False
+    cristal: bool = True
+    duplex: bool = False
+    #: El aparato sabe decir si tiene papel cargado. Sin esto no se puede
+    #: avisar "cargá el taco" antes de empezar: hay que intentar y fallar.
+    detecta_papel: bool = False
+    #: Estado actual, sólo válido si detecta_papel.
+    hay_papel: bool = False
+    #: True si las propiedades se pudieron leer de verdad. Si es False, lo
+    #: de arriba son valores por defecto y no hechos.
+    conocidas: bool = False
+
+    @property
+    def por_lote(self) -> bool:
+        """Si tiene sentido ofrecer "escanear todo el taco de corrido"."""
+        return self.alimentador
+
+    def descripcion(self) -> str:
+        """Texto corto para el chip de la pantalla."""
+        if not self.conocidas:
+            return "Escáner listo"
+        if self.alimentador and self.duplex:
+            return "Alimentador dúplex"
+        if self.alimentador:
+            return "Con alimentador"
+        return "Sólo cristal"
+
+
+def interpretar_capacidades(bits_capacidad: int, bits_estado: int = 0, *,
+                            conocidas: bool = True) -> CapacidadesEscaner:
+    """Traduce los bits que publica WIA a algo con nombre.
+
+    Función pura y separada del acceso al dispositivo a propósito: es la
+    parte que se puede equivocar (un bit mal leído convierte un escáner
+    dúplex en uno simple) y la única que se puede probar sin hardware.
+
+    Un aparato sin ningún bit de origen declarado se toma como "cristal":
+    algo tiene que tener, y es lo que ya se venía asumiendo.
+    """
+    cap = int(bits_capacidad or 0)
+    est = int(bits_estado or 0)
+
+    alimentador = bool(cap & WIA_CAP_FEEDER)
+    cristal = bool(cap & WIA_CAP_FLATBED) or not alimentador
+
+    return CapacidadesEscaner(
+        alimentador=alimentador,
+        cristal=cristal,
+        # El dúplex sin alimentador no significa nada: son las dos caras de
+        # la hoja que PASA por el alimentador. Un driver puede publicar el
+        # bit igual, y creerle deja un modo que no se puede usar.
+        duplex=bool(cap & WIA_CAP_DUPLEX) and alimentador,
+        detecta_papel=bool(cap & WIA_CAP_DETECT_FEED),
+        hay_papel=bool(est & WIA_EST_FEED_READY),
+        conocidas=conocidas,
+    )
+
+
+def _leer_propiedad(objeto, propiedad, defecto=0):
+    """Lee una propiedad WIA sin romperse si el driver no la publica.
+
+    Casi ningún driver publica todas: pedir una que no está tira com_error,
+    y eso no es un fallo, es lo normal.
+    """
+    try:
+        return objeto.Properties(str(propiedad)).Value
+    except Exception:                                # noqa: BLE001
+        log.debug("El dispositivo no publica la propiedad %s", propiedad)
+        return defecto
+
+
+def capacidades_escaner(id_dispositivo: str = "") -> CapacidadesEscaner:
+    """Capacidades del escáner indicado, o del primero que haya.
+
+    Nunca lanza: si algo falla devuelve capacidades conservadoras con
+    `conocidas=False`. Es una consulta para decidir qué botones habilitar,
+    y no poder responderla no debería impedir escanear como siempre.
+    """
+    com = _importar_com()
+    if com is None:
+        return CapacidadesEscaner()
+
+    try:
+        with com_inicializado() as ok:
+            if not ok:
+                return CapacidadesEscaner()
+            _, cliente = com
+            manager = cliente.Dispatch("WIA.DeviceManager")
+            infos = manager.DeviceInfos
+            for i in range(1, infos.Count + 1):        # WIA indexa desde 1
+                info = infos(i)
+                if int(info.Type) != WIA_TIPO_ESCANER:
+                    continue
+                if id_dispositivo and str(info.DeviceID) != id_dispositivo:
+                    continue
+                dispositivo = info.Connect()
+                return interpretar_capacidades(
+                    _leer_propiedad(dispositivo,
+                                    WIA_DPS_DOCUMENT_HANDLING_CAPABILITIES),
+                    _leer_propiedad(dispositivo,
+                                    WIA_DPS_DOCUMENT_HANDLING_STATUS),
+                )
+    except Exception as e:                           # noqa: BLE001
+        log.warning("No se pudieron leer las capacidades del escáner: %s", e)
+    return CapacidadesEscaner()
+
+
 def verificar_escaneo_disponible() -> None:
     """Lanza ErrorDispositivo si no se puede escanear."""
     if sys.platform != "win32":
@@ -452,6 +610,167 @@ def adquirir_imagen(ruta_destino: str, *, dpi: int = 600,
     return ruta_destino
 
 
+#: Formato PNG para las transferencias WIA (sin pérdida).
+WIA_FORMATO_PNG = "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}"
+
+#: Propiedades de resolución del ítem de escaneo.
+WIA_IPS_XRES = 6147
+WIA_IPS_YRES = 6148
+
+
+class ErrorLoteParcial(ErrorDispositivo):
+    """Falló a mitad de un lote, pero algunas páginas se alcanzaron a leer.
+
+    Existe porque tirarlas sería lo peor que puede hacer la aplicación en
+    ese momento: un atasco en la hoja 18 de 20 obligaría a rehacer las 17
+    que ya estaban bien.
+    """
+
+    def __init__(self, causa: ErrorDispositivo, rutas: list[str]):
+        super().__init__(causa.mensaje, detalle=getattr(causa, "detalle", ""),
+                         sugerencia=getattr(causa, "sugerencia", ""))
+        self.rutas = list(rutas)
+
+
+def bits_de_origen(*, alimentador: bool, duplex: bool) -> int:
+    """Los bits de DOCUMENT_HANDLING_SELECT para el trabajo pedido.
+
+    Pura para poder probarla: pedir dúplex sin alimentador es un error de
+    programación que, mandado al driver, se traduce en un com_error
+    incomprensible o —peor— en que escanee sólo la primera cara sin decir
+    nada.
+    """
+    if duplex and not alimentador:
+        raise ValueError("El dúplex sólo existe con alimentador: son las "
+                         "dos caras de la hoja que pasa por él.")
+    if not alimentador:
+        return WIA_SEL_FLATBED
+    return WIA_SEL_FEEDER | (WIA_SEL_DUPLEX if duplex else 0)
+
+
+def configurar_lote(dispositivo, *, alimentador: bool, duplex: bool,
+                    paginas: int = WIA_TODAS_LAS_PAGINAS) -> None:
+    """Deja el dispositivo listo para escanear del alimentador.
+
+    Si el driver rechaza alguna propiedad se sigue igual: muchos aceptan
+    sólo un subconjunto, y fallar acá impediría escanear en aparatos donde
+    el trabajo habría salido bien con los valores por defecto.
+    """
+    seleccion = bits_de_origen(alimentador=alimentador, duplex=duplex)
+    for propiedad, valor in ((WIA_DPS_DOCUMENT_HANDLING_SELECT, seleccion),
+                             (WIA_DPS_PAGES, int(paginas))):
+        try:
+            dispositivo.Properties(str(propiedad)).Value = valor
+        except Exception as e:                       # noqa: BLE001
+            log.info("El escáner no aceptó la propiedad %s=%s: %s",
+                     propiedad, valor, e)
+
+
+def _fijar_dpi(item, dpi: int) -> None:
+    for propiedad in (WIA_IPS_XRES, WIA_IPS_YRES):
+        try:
+            item.Properties(str(propiedad)).Value = int(dpi)
+        except Exception:                            # noqa: BLE001
+            log.debug("El escáner no admite fijar la propiedad %s", propiedad)
+
+
+def adquirir_lote(destino_de, *, dpi: int = 300, alimentador: bool = True,
+                  duplex: bool = False, id_dispositivo: str = "",
+                  al_llegar=None, cancelado=None,
+                  maximo: int = LOTE_MAX_PAGINAS) -> list[str]:
+    """Escanea todo el taco del alimentador y devuelve las rutas guardadas.
+
+    `destino_de(n)` da la ruta del archivo de la página n (0-based);
+    `al_llegar(ruta, n)` se llama con cada página apenas está en disco, para
+    que la pantalla la muestre sin esperar a que termine el lote; y
+    `cancelado()` se consulta entre páginas.
+
+    Cómo termina
+    ------------
+    El bucle no sabe de antemano cuántas hojas hay: le pide una tras otra
+    hasta que el escáner contesta WIA_ERROR_PAPER_EMPTY, que es la forma
+    NORMAL de terminar. Si eso pasa en la primera página, es que la bandeja
+    estaba vacía, y ahí sí es un error que hay que contar.
+
+    `maximo` es un tope de cordura: si un driver nunca avisa que se quedó
+    sin papel —los hay— el bucle llenaría el disco.
+
+    Debe correr en un hilo con COM inicializado (usar com_inicializado()).
+    """
+    com = _importar_com()
+    if com is None:
+        raise ErrorDispositivo(
+            "No se pudieron cargar los componentes de Windows para escanear.",
+            sugerencia="Instalalos con:  pip install pywin32")
+
+    import os
+
+    _, cliente = com
+    manager = cliente.Dispatch("WIA.DeviceManager")
+    dispositivo = _conectar(manager, id_dispositivo)
+    configurar_lote(dispositivo, alimentador=alimentador, duplex=duplex)
+
+    rutas: list[str] = []
+    while len(rutas) < maximo:
+        if cancelado is not None and cancelado():
+            break
+        try:
+            item = dispositivo.Items(1)
+            _fijar_dpi(item, dpi)
+            imagen = item.Transfer(WIA_FORMATO_PNG)
+        except Exception as e:                       # noqa: BLE001
+            if es_fin_de_papel(e):
+                if rutas:
+                    break                            # se terminó el taco: ok
+                raise ErrorDispositivo(
+                    "No hay papel en el alimentador.",
+                    detalle=str(e),
+                    sugerencia="Cargá las hojas en la bandeja y volvé a "
+                               "intentar.") from None
+            if es_cancelacion_usuario(e):
+                if rutas:
+                    break                            # se queda con lo escaneado
+                raise                                # crudo: lo reconoce el worker
+            if rutas:
+                # Un atasco a mitad del taco no debe tirar a la basura lo
+                # que ya se escaneó: se corta acá y el llamador decide.
+                raise ErrorLoteParcial(interpretar_error_wia(e), rutas) from e
+            raise interpretar_error_wia(e) from e
+
+        ruta = destino_de(len(rutas))
+        imagen.SaveFile(ruta)
+        if not os.path.exists(ruta) or os.path.getsize(ruta) == 0:
+            raise ErrorDispositivo(
+                "El escáner devolvió una página vacía.",
+                sugerencia="Revisá que el papel esté bien colocado.")
+        rutas.append(ruta)
+        if al_llegar is not None:
+            al_llegar(ruta, len(rutas))
+
+    if not rutas:
+        raise ErrorDispositivo(
+            "El escáner no devolvió ninguna página.",
+            sugerencia="Revisá que el papel esté bien colocado y volvé a "
+                       "intentar.")
+    return rutas
+
+
+def _conectar(manager, id_dispositivo: str = ""):
+    """Conecta con el escáner pedido, o con el primero que haya."""
+    infos = manager.DeviceInfos
+    for i in range(1, infos.Count + 1):              # WIA indexa desde 1
+        info = infos(i)
+        if int(info.Type) != WIA_TIPO_ESCANER:
+            continue
+        if id_dispositivo and str(info.DeviceID) != id_dispositivo:
+            continue
+        return info.Connect()
+    raise ErrorDispositivo(
+        "No se detectó ningún escáner conectado.",
+        sugerencia="Verificá que esté encendido y que Windows lo reconozca "
+                   "en Configuración → Impresoras y escáneres.")
+
+
 def interpretar_error_wia(error: Exception) -> ErrorDispositivo:
     """Traduce un com_error de WIA a algo que se pueda leer.
 
@@ -474,6 +793,18 @@ def interpretar_error_wia(error: Exception) -> ErrorDispositivo:
          "Puede estar en uso por otro programa. Cerralo y reintentá."),
         ("coinitialize", "Error interno al inicializar el escáner.",
          "Reiniciá la aplicación. Si persiste, reportalo."),
+        # Los tres de abajo son propios del alimentador. Con cristal casi
+        # no aparecen; con ADF son moneda corriente y merecen su mensaje.
+        (WIA_ERROR_PAPER_JAM, "Se atascó el papel en el alimentador.",
+         "Abrí la tapa, sacá la hoja trabada con cuidado y volvé a cargar "
+         "el taco. Las páginas que ya se escanearon quedan en la lista."),
+        (WIA_ERROR_PAPER_PROBLEM, "El alimentador no pudo tomar la hoja.",
+         "Emparejá el taco, revisá que no haya ganchos ni hojas pegadas y "
+         "cargalo de nuevo."),
+        (WIA_ERROR_PAPER_EMPTY, "No hay papel en el alimentador.",
+         "Cargá las hojas en la bandeja y volvé a intentar."),
+        (WIA_ERROR_COVER_OPEN, "La tapa del escáner está abierta.",
+         "Cerrala y reintentá."),
     )
     for codigo, mensaje, sugerencia in conocidos:
         if codigo in bajo:
@@ -487,6 +818,32 @@ def interpretar_error_wia(error: Exception) -> ErrorDispositivo:
 
 
 def es_cancelacion_usuario(error: Exception) -> bool:
-    """True si el 'error' es en realidad el usuario cerrando el diálogo."""
+    """True si el 'error' es en realidad el usuario cerrando el diálogo.
+
+    Ojo con lo que NO entra acá: 0x80210003 es WIA_ERROR_PAPER_EMPTY, "no
+    hay papel", y durante mucho tiempo estuvo en esta lista. Con el
+    cristal daba igual —ese código casi no aparece— pero con alimentador
+    es la señal NORMAL de que se terminó el taco: tomarla por una
+    cancelación haría que un lote de 20 hojas terminara en silencio como
+    si el usuario hubiera cerrado el diálogo, y que escanear con la
+    bandeja vacía no dijera nada. Va en `es_fin_de_papel()`.
+    """
     texto = str(error).lower()
-    return any(x in texto for x in ("cancel", "0x80210003", "user cancel"))
+    return any(x in texto for x in ("cancel", "user cancel"))
+
+
+def es_fin_de_papel(error: Exception) -> bool:
+    """True si el escáner avisó que se quedó sin hojas.
+
+    Es cómo termina un lote del alimentador cuando salió bien, y también
+    lo que se recibe al pedirle que escanee con la bandeja vacía. Quien
+    llama distingue los dos casos por si alcanzó a traer alguna página.
+    """
+    return WIA_ERROR_PAPER_EMPTY in str(error).lower()
+
+
+def es_atasco(error: Exception) -> bool:
+    """True si el papel se trabó. Distinto de quedarse sin papel: acá hay
+    una hoja adentro del aparato y el usuario tiene que ir a sacarla."""
+    texto = str(error).lower()
+    return WIA_ERROR_PAPER_JAM in texto or "paper jam" in texto

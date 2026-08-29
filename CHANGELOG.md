@@ -11,6 +11,28 @@ build falla antes de publicar.
 Los encabezados de versión son `## X.Y.Z`, con el mismo número que el tag
 (`vX.Y.Z`) y que `modules/version.py`. Un test lo verifica.
 
+## 0.14.0 — Listo para el escáner con alimentador
+
+Preparación para la impresora nueva, que escanea a doble faz y de corrido.
+
+**Escanear todo el taco de una vez**
+- Un selector nuevo elige cómo entra el papel: hoja por hoja desde el cristal, todo el alimentador, o el alimentador leyendo las dos caras
+- Las opciones que aparecen son las que el escáner dice saber hacer. En una máquina sin alimentador el selector ni se muestra: ofrecerlo sería un botón que devuelve error
+- Las páginas se agregan a la lista **a medida que salen**, no al final. Con 30 hojas el lote son varios minutos y la pantalla no puede quedarse muda todo ese rato
+- Se puede cortar el lote sin esperar a que termine
+
+**Dorsos en blanco**
+- Al escanear a doble faz, las hojas impresas de un solo lado dejan un dorso vacío. Al terminar se ofrece quitarlos, listando cuáles son
+- Se **ofrece**, nunca se hace solo: la detección mide cuánta tinta hay en la hoja, y una página que sólo tiene un número de folio no se distingue de una vacía por ese camino. El umbral está calibrado para que cualquier marca real —un sello, una firma, un folio— sobreviva
+
+**Errores del alimentador**
+- *"No hay papel"*, *"se atascó"*, *"no pudo tomar la hoja"* y *"la tapa está abierta"* ahora tienen cada uno su mensaje y su instrucción, en vez de un genérico "el escáner reportó un error"
+- Un atasco a mitad del taco ya no tira lo escaneado: las páginas que alcanzaron a salir quedan en la lista y se puede seguir desde donde quedó
+- **Arreglo importante:** el código que el escáner devuelve al quedarse sin papel estaba clasificado como "el usuario canceló". Con cristal no se notaba —ese código casi no aparece—, pero con alimentador es la señal normal de fin de taco: un lote de 20 hojas habría terminado en silencio como si alguien hubiera cerrado el diálogo
+
+**Arreglo visual**
+- Las listas desplegables no mostraban ninguna flecha, así que parecían campos de texto. Afectaba a todas las de la aplicación, no sólo a las nuevas
+
 ## 0.13.0 — Unir, dividir y seguir escaneando
 
 **Herramienta nueva: Unir y dividir PDFs**
