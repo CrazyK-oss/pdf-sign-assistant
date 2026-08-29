@@ -32,6 +32,7 @@ from modules.documento import (
     filtrar_pdfs,
     filtrar_soportados,
     formatear_rangos,
+    parsear_grupos,
     parsear_rangos,
     sanear_nombre,
 )
@@ -589,3 +590,43 @@ def test_filtrar_soportados_conserva_el_orden_en_que_se_soltaron():
     soltó es el orden en que espera verlos."""
     assert filtrar_soportados(
         ["b.pdf", "a.png", "notas.txt", "c.jpeg"]) == ["b.pdf", "a.png", "c.jpeg"]
+
+
+# ── Grupos (dividir) ──────────────────────────────────────────────────────────
+
+def test_parsear_grupos_hace_un_grupo_por_coma():
+    """Es la diferencia con parsear_rangos: al dividir, "1-3, 7-9" son dos
+    archivos y no uno de seis páginas."""
+    assert parsear_grupos("1-3, 7-9", 9) == [[0, 1, 2], [6, 7, 8]]
+
+
+def test_un_grupo_de_una_sola_pagina():
+    assert parsear_grupos("2, 5", 9) == [[1], [4]]
+
+
+def test_los_grupos_si_pueden_repetir_paginas():
+    """Sacar dos copias de la misma página en archivos distintos es
+    legítimo; el que no repite es parsear_rangos, que arma un solo PDF."""
+    assert parsear_grupos("1-2, 2-3", 9) == [[0, 1], [1, 2]]
+
+
+def test_partir_en_grupos(doc):
+    trozos = doc.partir_en([[0, 1], [3]])
+    assert [orden(t) for t in trozos] == [["p1.png", "p2.png"], ["p4.png"]]
+
+
+def test_partir_en_saltea_los_grupos_vacios(doc):
+    """Un grupo entero fuera de rango no debe producir un PDF sin páginas."""
+    trozos = doc.partir_en([[0], [98, 99], [2]])
+    assert [orden(t) for t in trozos] == [["p1.png"], ["p3.png"]]
+
+
+def test_partir_en_sin_grupos_no_da_nada(doc):
+    assert doc.partir_en([]) == []
+
+
+def test_dividir_por_rangos_de_punta_a_punta(doc):
+    grupos = parsear_grupos("1-2, 4", doc.total)
+    trozos = doc.partir_en(grupos)
+    assert [t.total for t in trozos] == [2, 1]
+    assert orden(trozos[1]) == ["p4.png"]

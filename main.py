@@ -333,21 +333,29 @@ class VentanaPrincipal(QMainWindow):
     def _crear_pagina(self, destino: str) -> QWidget | None:
         """Construye una herramienta la primera vez que se abre.
 
-        La de escaneo consulta el escáner al armarse, y hacerlo durante el
-        arranque retrasaría la ventana por algo que quizás nunca se use.
+        Se hace tarde y no en el arranque: la de escaneo consulta el
+        escáner al armarse, y las dos importan PyMuPDF y pypdf. Retrasar
+        la ventana por algo que quizás nunca se use no tiene sentido.
         """
-        if destino != "escanear":
+        if destino == "escanear":
+            from modules.herramienta_escaneo import VistaEscanearAPdf
+
+            vista = VistaEscanearAPdf(
+                CARPETA_FIRMADO,
+                calidad_inicial=self.config.get("calidad_pdf"),
+                limite_mb=self.config.get("limite_correo_mb", 20))
+            self._herramienta_escaneo = vista
+
+        elif destino == "unir":
+            from modules.herramienta_unir import VistaUnirDividirPdf
+
+            vista = VistaUnirDividirPdf(CARPETA_FIRMADO)
+
+        else:
             return None
 
-        from modules.herramienta_escaneo import VistaEscanearAPdf
-
-        vista = VistaEscanearAPdf(
-            CARPETA_FIRMADO,
-            calidad_inicial=self.config.get("calidad_pdf"),
-            limite_mb=self.config.get("limite_correo_mb", 20))
         vista.volver.connect(lambda: self._ir_a(INICIO))
         vista.documento_guardado.connect(self._on_pdf_escaneado)
-        self._herramienta_escaneo = vista
         return self._registrar_pagina(destino, vista)
 
     def _accion_lateral(self, clave: str) -> None:

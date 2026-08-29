@@ -369,6 +369,15 @@ class Documento:
         return [self.subconjunto(range(i, min(i + n, self.total)))
                 for i in range(0, self.total, n)]
 
+    def partir_en(self, grupos) -> list["Documento"]:
+        """Un documento por grupo de posiciones. Los grupos vacíos se saltean.
+
+        Es lo que devuelve `parsear_grupos`: "1-3, 7-9" son dos archivos,
+        no uno con seis páginas.
+        """
+        trozos = [self.subconjunto(g) for g in grupos]
+        return [t for t in trozos if not t.vacio]
+
     # ── Presentación ──────────────────────────────────────────────────────────
 
     def descripcion(self) -> str:
@@ -476,8 +485,12 @@ def filtrar_soportados(rutas) -> list[str]:
 
 # ── Rangos de páginas ─────────────────────────────────────────────────────────
 
-def parsear_rangos(texto: str, total: int) -> list[int]:
-    """Convierte "1-3, 5, 9-7" en posiciones 0-based: [0,1,2,4,8,7,6].
+def parsear_grupos(texto: str, total: int) -> list[list[int]]:
+    """Convierte "1-3, 7-9" en un grupo por coma: [[0,1,2], [6,7,8]].
+
+    Los grupos son lo que necesita **dividir**: cada uno se guarda como un
+    archivo aparte. Para las herramientas que quieren una sola lista está
+    `parsear_rangos`, que aplana esto.
 
     Lo que el usuario escribe es 1-based porque es lo que ve en pantalla;
     lo que devuelve es 0-based porque es lo que usa el modelo. Traducir en
@@ -496,7 +509,7 @@ def parsear_rangos(texto: str, total: int) -> list[int]:
     if not limpio:
         raise ValueError("Escribí qué páginas querés, por ejemplo: 1-3, 5")
 
-    indices: list[int] = []
+    grupos: list[list[int]] = []
     for parte in (p.strip() for p in limpio.split(",")):
         if not parte:
             continue
@@ -513,16 +526,23 @@ def parsear_rangos(texto: str, total: int) -> list[int]:
                     f"La página {n} no existe: el documento tiene {total}.")
 
         paso = 1 if hasta >= desde else -1
-        indices.extend(range(desde - 1, hasta - 1 + paso, paso))
+        grupos.append(list(range(desde - 1, hasta - 1 + paso, paso)))
 
-    if not indices:
+    if not grupos:
         raise ValueError("Escribí qué páginas querés, por ejemplo: 1-3, 5")
+    return grupos
 
-    # Sin repetir, conservando el orden en que se escribieron: pedir
-    # "1-3, 2" no debe meter la página 2 dos veces en el PDF.
+
+def parsear_rangos(texto: str, total: int) -> list[int]:
+    """Como `parsear_grupos` pero en una sola lista, sin repetir.
+
+    Conserva el orden en que se escribieron: pedir "1-3, 2" no debe meter
+    la página 2 dos veces en el PDF, y "3,1,2" es una permutación válida.
+    """
     vistos: dict[int, None] = {}
-    for i in indices:
-        vistos.setdefault(i, None)
+    for grupo in parsear_grupos(texto, total):
+        for i in grupo:
+            vistos.setdefault(i, None)
     return list(vistos)
 
 
