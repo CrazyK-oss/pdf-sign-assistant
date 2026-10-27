@@ -284,29 +284,48 @@ def test_descarga_con_hash_alterado_se_rechaza(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_descarga_sin_sumas_publicadas_igual_funciona(tmp_path, monkeypatch):
-    """Un Release viejo puede no tener SHA256SUMS: se avisa, no se bloquea."""
+def test_descarga_sin_sumas_publicadas_se_rechaza(tmp_path, monkeypatch):
+    """Sin SHA256SUMS no hay cómo verificar: no se baja ni se instala nada."""
     _simular_descarga(monkeypatch, b"instalador", None)
-    ruta = act.descargar_verificado(_info(con_sumas=False), carpeta=tmp_path)
-    from pathlib import Path
-    assert Path(ruta).exists()
+    with pytest.raises(ValueError) as info:
+        act.descargar_verificado(_info(con_sumas=False), carpeta=tmp_path)
+    assert "SHA256SUMS" in str(info.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_descarga_sin_la_linea_del_instalador_se_rechaza(tmp_path, monkeypatch):
+    """Un SHA256SUMS que no nombra al instalador tampoco sirve."""
+    _simular_descarga(monkeypatch, b"instalador", f"{'a' * 64}  Otro.exe\n")
+    with pytest.raises(ValueError):
+        act.descargar_verificado(_info(), carpeta=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_abrir_solo_acepta_https():
+    for url in ("file:///C:/Windows/win.ini", "http://ejemplo/Setup.exe"):
+        with pytest.raises(ValueError):
+            act._abrir(url)
 
 
 def test_descarga_cancelada_no_deja_archivo(tmp_path, monkeypatch):
-    _simular_descarga(monkeypatch, b"x" * 200_000, None)
+    contenido = b"x" * 200_000
+    _simular_descarga(monkeypatch, contenido,
+                      f"{hashlib.sha256(contenido).hexdigest()}  Setup.exe\n")
 
     with pytest.raises(InterruptedError):
-        act.descargar_verificado(_info(con_sumas=False), carpeta=tmp_path,
+        act.descargar_verificado(_info(), carpeta=tmp_path,
                                  cancelado=lambda: True)
     assert list(tmp_path.iterdir()) == []
 
 
 def test_descarga_rechaza_archivo_gigante(tmp_path, monkeypatch):
-    _simular_descarga(monkeypatch, b"x" * 10, None)
+    contenido = b"x" * 10
+    _simular_descarga(monkeypatch, contenido,
+                      f"{hashlib.sha256(contenido).hexdigest()}  Setup.exe\n")
     monkeypatch.setattr(act, "TAM_MAXIMO", 5)
 
     with pytest.raises(ValueError):
-        act.descargar_verificado(_info(con_sumas=False), carpeta=tmp_path)
+        act.descargar_verificado(_info(), carpeta=tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 

@@ -33,10 +33,13 @@ Decisiones deliberadas
 ----------------------
 * NUNCA se descarga ni se ejecuta nada sin que el usuario acepte. La
   comprobación es automática; la instalación, jamás.
-* El hash se verifica siempre. Estamos por ejecutar un binario bajado de
-  internet: sin verificar, una descarga corrupta o interceptada se
-  ejecutaría igual. (Ojo: esto protege la integridad de la descarga, no
-  cubre un repositorio comprometido — para eso hace falta firma de código.)
+* El hash se verifica siempre, y sin hash no se instala: si el Release no
+  publica SHA256SUMS (o no trae la línea del instalador), la descarga se
+  rechaza. Estamos por ejecutar un binario bajado de internet: sin
+  verificar, una descarga corrupta o interceptada se ejecutaría igual.
+  (Ojo: esto protege la integridad de la descarga, no cubre un repositorio
+  comprometido — para eso hace falta firma de código.)
+* Sólo se habla con el servidor por HTTPS (nada de file:// ni http://).
 * Todo falla en silencio. Una PC de oficina sin internet, detrás de un
   proxy o con el firewall cerrado no puede ver un error cada vez que
   abre la aplicación.
@@ -147,6 +150,9 @@ class InfoActualizacion:
 
 
 def _abrir(url: str, binario: bool = False):
+    # urlopen también abre file:// y http://: sólo HTTPS, venga de donde venga la URL.
+    if not url.lower().startswith("https://"):
+        raise ValueError(f"URL no permitida (sólo HTTPS): {url!r}")
     pedido = urllib.request.Request(url, headers={
         # GitHub rechaza pedidos sin User-Agent
         "User-Agent": f"PDFSignAssistant/{__version__}",
@@ -246,6 +252,11 @@ def descargar_verificado(info: InfoActualizacion, *,
     esperado = None
     if info.url_sumas:
         esperado = sha256_esperado(info.url_sumas, info.nombre_instalador)
+    if not esperado:
+        # Sin hash publicado no hay forma de saber qué se está por ejecutar.
+        raise ValueError(
+            "El Release no publica la firma (SHA256SUMS) del instalador.\n"
+            "Por seguridad no se instala; descargalo desde la página del proyecto.")
 
     carpeta = Path(carpeta or (Path(tempfile.gettempdir()) /
                                "pdf_sign_assistant_update"))
@@ -284,12 +295,10 @@ def descargar_verificado(info: InfoActualizacion, *,
 
         avisar(98, "Verificando la descarga…")
         obtenido = digest.hexdigest()
-        if esperado and obtenido != esperado:
+        if obtenido != esperado:
             raise ValueError(
                 "El archivo descargado no coincide con la firma publicada.\n"
                 "Se canceló la instalación por seguridad.")
-        if not esperado:
-            log.warning("El Release no publica SHA256SUMS: no se pudo verificar")
 
         avisar(100, "Listo para instalar")
         return str(destino)

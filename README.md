@@ -156,6 +156,7 @@ pdf-sign-assistant/
 ├── config.example.json      # Plantilla de configuración
 ├── config.example.env       # Plantilla de variables de entorno
 ├── requirements.txt         # Dependencias de Python
+├── requirements.lock        # Versiones exactas con hash (las que usa el Release)
 ├── pdf_sign_assistant.spec  # Configuración de PyInstaller para generar el .exe
 │                            # (en ejecución, los datos NO se guardan acá:
 │                            #  ver la tabla de "Dónde quedan tus archivos")
