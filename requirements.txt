@@ -1,6 +1,10 @@
 # PDF Sign Assistant — dependencias
 #   pip install -r requirements.txt
 #
+# El Release NO instala desde acá sino desde requirements.lock (versiones
+# exactas con hash). Si cambiás algo en este archivo, regenerá el lock
+# (instrucciones al principio de requirements.lock).
+#
 # Nota: exchangelib y watchdog estaban listados pero ningún módulo los
 # importa (el envío pasó a mailto: y no hay vigilancia de carpetas por
 # watchdog). Se quitaron: exchangelib solo arrastraba lxml, dnspython y
