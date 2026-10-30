@@ -110,6 +110,25 @@ CATALOGO: dict[str, Icono] = {
         "M2.5 16.5L12 21l9.5-4.5",
         "M2.5 11.8L12 16.3l9.5-4.5",
     ),
+    # Tijera: los dos filos se cruzan en el centro y los mangos son
+    # circunferencias abajo. Se lee como "cortar" a 16 px, que es donde
+    # vive: el botón de dividir.
+    "tijera": _i(
+        "M6.5 3.2L15.5 15.6",
+        "M17.5 3.2L8.5 15.6",
+        "M6 21a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2z",
+        "M18 21a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2z",
+    ),
+    # Unir: dos ramas que confluyen en un solo tronco con punta de flecha.
+    # La primera versión eran dos flechas cruzándose, y se leía "mezclar
+    # al azar" —el icono de shuffle de cualquier reproductor— que es
+    # justo lo contrario de lo que hace el botón.
+    "unir": _i(
+        "M3.5 6.5h6l3.5 5.5",
+        "M3.5 17.5h6l3.5-5.5",
+        "M13 12h7.5",
+        "M17.5 8.5l3.5 3.5-3.5 3.5",
+    ),
 
     # ── Dispositivos ──────────────────────────────────────────────────────────
     "impresora": _i(

@@ -118,6 +118,16 @@ hiddenimports = [
     "reportlab.graphics.barcode.usps",
     "reportlab.graphics.barcode.usps4s",
     "reportlab.graphics.barcode.ecc200datamatrix",
+    # pypdf importa cryptography de forma perezosa, adentro de la función
+    # que descifra: el análisis estático de PyInstaller no la ve. Sin este
+    # renglón, el .exe sale sin ella y cualquier PDF cifrado con AES —los
+    # que sólo restringen imprimir o copiar, que son mayoría— deja de
+    # abrirse en la versión empaquetada aunque ande en desarrollo.
+    "cryptography",
+    "cryptography.hazmat.primitives.ciphers",
+    "cryptography.hazmat.primitives.ciphers.algorithms",
+    "cryptography.hazmat.primitives.ciphers.modes",
+    "cryptography.hazmat.backends.openssl",
     "win32api",
     "win32con",
     "win32print",
@@ -125,8 +135,10 @@ hiddenimports = [
     "pywintypes",
     "modules.actualizaciones",
     "modules.actualizador",
+    "modules.changelog",
     "modules.dispositivos",
-    "modules.documento_escaneado",
+    "modules.armado_pdf",
+    "modules.documento",
     "modules.errores",
     "modules.escaner_qt",
     "modules.fase1_preview",
@@ -135,9 +147,13 @@ hiddenimports = [
     "modules.fase4_email",
     "modules.fase_guardar",
     "modules.herramienta_escaneo",
+    "modules.herramienta_unir",
+    "modules.hojas",
     "modules.iconos",
     "modules.imagen_pdf",
+    "modules.lista_paginas",
     "modules.navegacion",
+    "modules.previa",
     "modules.settings",
     "modules.setup",
     "modules.theme",

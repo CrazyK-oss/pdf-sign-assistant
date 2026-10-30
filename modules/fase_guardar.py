@@ -54,7 +54,17 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from modules.imagen_pdf import _borrar_si_existe, _convertir_imagen_a_pdf
+from modules.imagen_pdf import (
+    CALIDAD_DEFECTO,
+    LIMITE_CORREO_MB,
+    _borrar_si_existe,
+    _convertir_imagen_a_pdf,
+    calidad,
+    excede_limite,
+    formatear_peso,
+    opciones_calidad,
+    siguiente_mas_liviana,
+)
 from modules.theme import SIZE, SPACE, repolish, theme_signals
 from modules.trabajo import TrabajoFirma, formatear_paginas
 from modules.ui import (
@@ -63,6 +73,7 @@ from modules.ui import (
     BarraSuperior,
     boton,
     etiqueta,
+    selector,
     tarjeta,
 )
 
@@ -83,10 +94,12 @@ class _WorkerGuardar(QThread):
     listo    = pyqtSignal(str)        # ruta del PDF final
     error    = pyqtSignal(str)        # mensaje de error completo
 
-    def __init__(self, trabajo: TrabajoFirma, destino: Path):
+    def __init__(self, trabajo: TrabajoFirma, destino: Path,
+                 cal=CALIDAD_DEFECTO):
         super().__init__()            # SIN parent= a propósito
         self._trabajo = trabajo
         self._destino = destino
+        self._calidad = calidad(cal)
 
     def run(self):
         paginas = list(self._trabajo.paginas)
@@ -121,7 +134,7 @@ class _WorkerGuardar(QThread):
                     pct, f"Convirtiendo la página {pagina + 1} "
                          f"({i + 1} de {total})…")
                 ruta_pdf_pag = _convertir_imagen_a_pdf(
-                    ruta_img, self._trabajo.rotacion(pagina))
+                    ruta_img, self._trabajo.rotacion(pagina), self._calidad)
                 paginas_pdf[pagina] = ruta_pdf_pag
                 temporales.append(ruta_pdf_pag)
 
@@ -227,10 +240,13 @@ class FaseGuardar(QDialog):
     """
 
     guardado_listo = pyqtSignal(object)   # Path
+    calidad_elegida = pyqtSignal(str)     # clave, para recordarla
     cancelado      = pyqtSignal()
     _despachar_guardado_listo = pyqtSignal(str)
 
-    def __init__(self, trabajo: TrabajoFirma, carpeta_firmados: Path, parent=None):
+    def __init__(self, trabajo: TrabajoFirma, carpeta_firmados: Path,
+                 parent=None, calidad_inicial=CALIDAD_DEFECTO,
+                 limite_mb: float = LIMITE_CORREO_MB):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.Window |
                             Qt.WindowType.WindowCloseButtonHint)
@@ -239,6 +255,8 @@ class FaseGuardar(QDialog):
 
         self.trabajo = trabajo
         self._carpeta_firmados = carpeta_firmados
+        self._calidad_inicial = calidad_inicial
+        self._limite_mb = limite_mb
         self._worker: _WorkerGuardar | None = None
         self._ruta_final_pendiente: str | None = None
 
@@ -362,7 +380,31 @@ class FaseGuardar(QDialog):
         self.lbl_error_nombre = etiqueta("", rol="error", wrap=True)
         self.lbl_error_nombre.hide()
         lay.addWidget(self.lbl_error_nombre)
+
+        lay.addSpacing(SPACE["sm"])
+        fila_cal = QHBoxLayout()
+        fila_cal.setSpacing(SPACE["sm"])
+        fila_cal.addWidget(etiqueta("Calidad:", rol="hint"))
+        opciones = opciones_calidad()
+        self.combo_calidad = selector(
+            [(c, n) for c, n, _ in opciones],
+            actual=calidad(self._calidad_inicial).clave,
+            tooltips={c: d for c, _, d in opciones},
+            on_change=self._on_calidad, min_w=160)
+        fila_cal.addWidget(self.combo_calidad)
+        fila_cal.addStretch(1)
+        lay.addLayout(fila_cal)
+
+        self.lbl_calidad = etiqueta("", rol="hint", wrap=True)
+        lay.addWidget(self.lbl_calidad)
+        self._on_calidad(self.combo_calidad.currentData())
         return panel
+
+    def _on_calidad(self, clave) -> None:
+        """Explica la calidad elegida sin obligar a descubrir el tooltip."""
+        cal = calidad(clave)
+        self.lbl_calidad.setText(cal.descripcion)
+        self.calidad_elegida.emit(cal.clave)
 
     def _panel_progreso(self) -> QFrame:
         self.panel_progreso, lay = tarjeta(padding=SPACE["md"], spacing=SPACE["sm"])
@@ -454,7 +496,8 @@ class FaseGuardar(QDialog):
         self._ruta_final_pendiente = None
         self._set_guardando(True)
 
-        self._worker = _WorkerGuardar(self.trabajo, destino)
+        self._worker = _WorkerGuardar(self.trabajo, destino,
+                                      self.combo_calidad.currentData())
         self._worker.progreso.connect(self._on_progreso)
         self._worker.listo.connect(self._on_listo)
         self._worker.error.connect(self._on_error)
@@ -500,8 +543,59 @@ class FaseGuardar(QDialog):
         ruta = self._ruta_final_pendiente
         self._ruta_final_pendiente = None
         self._limpiar_worker()
-        if ruta is not None:
-            self._despachar_guardado_listo.emit(ruta)
+        if ruta is None:
+            return
+        if not self._revisar_tamano(Path(ruta)):
+            return          # el usuario eligió volver a guardar más liviano
+        self._despachar_guardado_listo.emit(ruta)
+
+    def _revisar_tamano(self, ruta: Path) -> bool:
+        """Avisa si el PDF no va a entrar como adjunto y ofrece rehacerlo.
+
+        Este documento existe para mandarse por correo: que pese más de lo
+        que Outlook acepta lo vuelve inservible, y descubrirlo recién al
+        adjuntarlo obliga a rehacer todo el trabajo.
+
+        Devuelve False si se relanzó el guardado con otra calidad.
+        """
+        try:
+            peso = ruta.stat().st_size
+        except OSError:
+            return True
+        if not excede_limite(peso, self._limite_mb):
+            return True
+
+        mas_liviana = siguiente_mas_liviana(self.combo_calidad.currentData())
+        cuadro = QMessageBox(self)
+        cuadro.setIcon(QMessageBox.Icon.Warning)
+        cuadro.setWindowTitle("El archivo es grande")
+        cuadro.setText(
+            f"El documento pesa {formatear_peso(peso)} y el límite de "
+            f"adjunto es de {self._limite_mb} MB.")
+
+        if mas_liviana is None:
+            cuadro.setInformativeText(
+                "Ya está guardado con la calidad más liviana. Vas a tener que "
+                "mandarlo por otro medio, o firmar menos páginas por vez.")
+            cuadro.exec()
+            return True
+
+        cuadro.setInformativeText(
+            f"Se puede volver a guardar con calidad «{mas_liviana.nombre}»: "
+            f"{mas_liviana.descripcion}")
+        rehacer = cuadro.addButton(f"Guardar en «{mas_liviana.nombre}»",
+                                   QMessageBox.ButtonRole.AcceptRole)
+        cuadro.addButton("Dejarlo así", QMessageBox.ButtonRole.RejectRole)
+        cuadro.exec()
+
+        if cuadro.clickedButton() is not rehacer:
+            return True
+
+        i = self.combo_calidad.findData(mas_liviana.clave)
+        if i >= 0:
+            self.combo_calidad.setCurrentIndex(i)
+        self._on_guardar()
+        return False
 
     @pyqtSlot(str)
     def _emitir_guardado_listo(self, ruta: str):

@@ -74,9 +74,12 @@ def imagen_color(ruta: Path, color: tuple[int, int, int],
     return ruta
 
 
-def ejecutar_worker(app, trabajo: TrabajoFirma, destino: Path) -> list[str]:
+def ejecutar_worker(app, trabajo: TrabajoFirma, destino: Path,
+                   cal=None) -> list[str]:
     """Corre el worker de guardado y devuelve los errores que emitió."""
-    worker = _WorkerGuardar(trabajo, destino)
+    from modules.imagen_pdf import CALIDAD_DEFECTO
+
+    worker = _WorkerGuardar(trabajo, destino, cal or CALIDAD_DEFECTO)
     errores: list[str] = []
     worker.error.connect(errores.append)
     worker.start()
@@ -237,3 +240,49 @@ def test_falla_si_la_pagina_esta_fuera_de_rango(app, pdf_origen, tmp_path):
     errores = ejecutar_worker(app, trabajo, tmp_path / "rango.pdf")
     assert errores
     assert "9" in errores[0]             # menciona el total real
+
+# ── Tamaño del archivo ────────────────────────────────────────────────────────
+
+def test_el_documento_firmado_entra_en_un_correo(app, pdf_origen, tmp_path):
+    """La razón de ser del documento es mandarse por correo.
+
+    Con el guardado sin pérdida, cada hoja escaneada a 600 dpi pesaba
+    3,4 MB y seis hojas ya no entraban en Outlook — y eso se descubría al
+    final, cuando el correo rechazaba el adjunto.
+    """
+    from modules.imagen_pdf import excede_limite, formatear_peso
+
+    trabajo = TrabajoFirma(ruta_pdf=pdf_origen, total_paginas=9)
+    paginas = [0, 3, 6]
+    trabajo.set_paginas(paginas)
+    for p in paginas:
+        # Tamaño de un A4 escaneado a 600 dpi, que es a lo que escanea
+        # la fase de firma.
+        trabajo.asignar_imagen(p, str(imagen_color(
+            tmp_path / f"h{p}.png", (245, 244, 240), tamano=(4962, 7014))))
+
+    destino = tmp_path / "para_correo.pdf"
+    assert ejecutar_worker(app, trabajo, destino) == []
+
+    peso = destino.stat().st_size
+    assert not excede_limite(peso), (
+        f"tres hojas firmadas dan {formatear_peso(peso)}, por encima del "
+        "límite de adjunto")
+
+
+def test_bajar_la_calidad_achica_el_archivo(app, pdf_origen, tmp_path):
+    """El botón de 'guardar más liviano' tiene que servir de algo."""
+    from modules.imagen_pdf import ALTA, MINIMA
+
+    pesos = {}
+    for cal in (ALTA, MINIMA):
+        trabajo = TrabajoFirma(ruta_pdf=pdf_origen, total_paginas=9)
+        trabajo.set_paginas([1])
+        trabajo.asignar_imagen(1, str(imagen_color(
+            tmp_path / f"c{cal.clave}.png", (240, 238, 235),
+            tamano=(2480, 3508))))
+        destino = tmp_path / f"{cal.clave}.pdf"
+        assert ejecutar_worker(app, trabajo, destino, cal) == []
+        pesos[cal.clave] = destino.stat().st_size
+
+    assert pesos["minima"] < pesos["alta"], pesos

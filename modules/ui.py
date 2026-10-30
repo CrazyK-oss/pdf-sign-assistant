@@ -40,6 +40,7 @@ from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QBoxLayout,
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -180,6 +181,27 @@ class BotonIcono(QPushButton):
         self._refrescar_icono()
 
 
+def _conectar_click(b: QPushButton, on_click) -> None:
+    """Conecta `clicked` descartando el argumento que manda Qt.
+
+    `QPushButton.clicked` emite un bool con el estado *checked*, y PyQt se
+    lo pasa al slot si éste acepta un argumento. Eso rompe el patrón más
+    natural para capturar una variable de bucle:
+
+        on_click=lambda ruta=str(p): self.abrir_documento.emit(ruta)
+
+    Qt pisa el valor por defecto con `False`, y la señal recibe un bool
+    donde esperaba un str. Reventó de verdad al abrir un documento
+    reciente desde la pantalla de inicio, con un mensaje que no se parece
+    en nada a la causa: "emit(): argument 1 has unexpected type 'bool'".
+
+    Ningún `on_click` de la aplicación quiere el estado del botón —los
+    que sí lo necesitan usan `toggled`— así que se llama sin argumentos y
+    los defaults quedan intactos.
+    """
+    b.clicked.connect(lambda *_descartado: on_click())
+
+
 def boton(
     texto: str = "",
     *,
@@ -219,7 +241,7 @@ def boton(
     if tooltip:
         b.setToolTip(tooltip)
     if on_click is not None:
-        b.clicked.connect(on_click)
+        _conectar_click(b, on_click)
     b.setEnabled(enabled)
     repolish(b)
     return b
@@ -252,7 +274,7 @@ def boton_icono(
         b.setToolTip(tooltip)
         b.setAccessibleName(tooltip)
     if on_click is not None:
-        b.clicked.connect(on_click)
+        _conectar_click(b, on_click)
     b.setEnabled(enabled)
     repolish(b)
     return b
@@ -315,6 +337,31 @@ class IconoLabel(QLabel):
 def icono_label(nombre: str, tamano: int = SIZE["icono"], *,
                 color: str = "text_muted") -> IconoLabel:
     return IconoLabel(nombre, tamano, color=color)
+
+
+def selector(opciones, *, actual: str = "", on_change=None,
+             min_w: int = 0, tooltips: dict | None = None) -> QComboBox:
+    """QComboBox estandarizado a partir de pares (clave, texto).
+
+    La clave viaja en el UserRole, así que el código nunca compara por el
+    texto visible: renombrar una opción no rompe la lógica.
+    """
+    c = QComboBox()
+    c.setMinimumHeight(SIZE["input"])
+    if min_w:
+        c.setMinimumWidth(min_w)
+    for clave, texto in opciones:
+        c.addItem(texto, clave)
+        if tooltips and clave in tooltips:
+            c.setItemData(c.count() - 1, tooltips[clave],
+                          Qt.ItemDataRole.ToolTipRole)
+    if actual:
+        i = c.findData(actual)
+        if i >= 0:
+            c.setCurrentIndex(i)
+    if on_change is not None:
+        c.currentIndexChanged.connect(lambda _i: on_change(c.currentData()))
+    return c
 
 
 def separador() -> QFrame:
@@ -804,6 +851,7 @@ __all__ = [
     "etiqueta",
     "expansor_h",
     "icono_label",
+    "selector",
     "separador",
     "separador_v",
     "sombra",

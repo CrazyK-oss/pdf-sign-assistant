@@ -1,6 +1,10 @@
 # PDF Sign Assistant — dependencias
 #   pip install -r requirements.txt
 #
+# El Release NO instala desde acá sino desde requirements.lock (versiones
+# exactas con hash). Si cambiás algo en este archivo, regenerá el lock
+# (instrucciones al principio de requirements.lock).
+#
 # Nota: exchangelib y watchdog estaban listados pero ningún módulo los
 # importa (el envío pasó a mailto: y no hay vigilancia de carpetas por
 # watchdog). Se quitaron: exchangelib solo arrastraba lxml, dnspython y
@@ -10,6 +14,7 @@
 PyQt6>=6.5                 # UI
 pymupdf>=1.23              # render de páginas (fitz)
 pypdf>=4.0                 # lectura/escritura del PDF final
+cryptography>=3.1          # pypdf la necesita para los PDF cifrados con AES
 Pillow>=10.0               # normalización de imágenes
 reportlab>=4.0             # motor principal imagen → PDF
 img2pdf>=0.5               # motor alternativo (subproceso aislado)
